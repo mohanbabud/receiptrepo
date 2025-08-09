@@ -1,25 +1,35 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    
+    function isAdmin(uid) {
+      return exists(/databases/$(database)/documents/users/$(uid)) &&
+             get(/databases/$(database)/documents/users/$(uid)).data.role == 'admin';
+    }
 
-    // Users collection - users can read/write their own data, admins can read all
+    // Users collection
     match /users/{userId} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
-      allow read: if request.auth != null && 
-        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+      // Read own doc or any doc if admin
+      allow read: if request.auth != null && (request.auth.uid == userId || isAdmin(request.auth.uid));
+
+      // Create own doc only as non-admin role (viewer/user); admins may create any
+      allow create: if request.auth != null && request.auth.uid == userId &&
+        request.resource.data.role in ['user', 'viewer'];
+      allow create: if request.auth != null && isAdmin(request.auth.uid);
+
+      // Update own doc but cannot change role; admins may update any
+      allow update: if request.auth != null && request.auth.uid == userId &&
+        request.resource.data.role == resource.data.role;
+      allow update, delete: if request.auth != null && isAdmin(request.auth.uid);
     }
     
     // Files collection - role-based access
     match /files/{fileId} {
       allow read: if request.auth != null;
       allow create: if request.auth != null && 
-        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['user', 'admin'];
+  exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+  get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['user', 'admin'];
       allow update, delete: if request.auth != null && 
-        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+  isAdmin(request.auth.uid);
     }
     
     // Requests collection - users can create and read their own, admins can read/update all
@@ -28,11 +38,9 @@ service cloud.firestore {
         request.auth.uid == resource.data.requestedBy;
       allow read: if request.auth != null && 
         (request.auth.uid == resource.data.requestedBy ||
-         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'));
+         isAdmin(request.auth.uid));
       allow update: if request.auth != null && 
-        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+        isAdmin(request.auth.uid);
     }
   }
 }
