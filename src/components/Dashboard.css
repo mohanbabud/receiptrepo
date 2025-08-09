@@ -576,6 +576,30 @@
   background: var(--gray-500);
 }
 
+/* Global drop overlay to simplify uploads on scroll-heavy UIs */
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 6, 23, 0.45); /* slate-950/45 */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 99999;
+  pointer-events: all;
+}
+.drop-overlay-inner {
+  background: rgba(255, 255, 255, 0.9);
+  border: 2px dashed var(--primary-color);
+  border-radius: 16px;
+  padding: 28px 36px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.drop-overlay-icon { font-size: 28px; }
+.drop-overlay-text { font-weight: 800; color: var(--text-primary); }
+
 /* Responsive Design */
 @media (max-width: 1024px) {
   .main-content {

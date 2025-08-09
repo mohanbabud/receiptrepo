@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { ref, uploadBytes } from 'firebase/storage';
 import { signOut } from 'firebase/auth';
 import { Link } from 'react-router-dom';
@@ -17,6 +17,9 @@ const Dashboard = ({ user, userRole }) => {
   const [collapseUploader, setCollapseUploader] = useState(true);
   const [droppedFiles, setDroppedFiles] = useState([]);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [dragOverlayVisible, setDragOverlayVisible] = useState(false);
+  const dragCounterRef = useRef(0);
+  const uploaderPanelRef = useRef(null);
 
   const handleLogout = async () => {
     try {
@@ -73,6 +76,58 @@ const Dashboard = ({ user, userRole }) => {
     e.preventDefault();
     e.stopPropagation();
   }, []);
+
+  // Auto-scroll uploader panel into view when expanded
+  useEffect(() => {
+    if (!collapseUploader && uploaderPanelRef.current) {
+      try { uploaderPanelRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch {}
+    }
+  }, [collapseUploader]);
+
+  // Global drag-and-drop overlay to make uploads easier regardless of scroll
+  useEffect(() => {
+    if (userRole === 'viewer') return; // no uploads for viewers
+    const hasFiles = (e) => Array.from(e?.dataTransfer?.types || []).includes('Files');
+    const onWindowDragEnter = (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      dragCounterRef.current += 1;
+      setDragOverlayVisible(true);
+    };
+    const onWindowDragOver = (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      setDragOverlayVisible(true);
+    };
+    const onWindowDragLeave = (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      dragCounterRef.current = Math.max(0, dragCounterRef.current - 1);
+      if (dragCounterRef.current === 0) setDragOverlayVisible(false);
+    };
+    const onWindowDrop = (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const files = Array.from(e.dataTransfer?.files || []);
+      if (files.length) {
+        setDroppedFiles(files);
+        setCollapseUploader(false);
+      }
+      dragCounterRef.current = 0;
+      setDragOverlayVisible(false);
+    };
+    window.addEventListener('dragenter', onWindowDragEnter);
+    window.addEventListener('dragover', onWindowDragOver);
+    window.addEventListener('dragleave', onWindowDragLeave);
+    window.addEventListener('drop', onWindowDrop);
+    return () => {
+      window.removeEventListener('dragenter', onWindowDragEnter);
+      window.removeEventListener('dragover', onWindowDragOver);
+      window.removeEventListener('dragleave', onWindowDragLeave);
+      window.removeEventListener('drop', onWindowDrop);
+    };
+  }, [userRole]);
 
   // (stats UI removed)
 
@@ -149,7 +204,12 @@ const Dashboard = ({ user, userRole }) => {
                   )}
                 </div>
               </div>
-              <div className="main-tree-content">
+              <div
+                className="main-tree-content"
+                onDragOver={userRole !== 'viewer' ? onBannerDrag : undefined}
+                onDragEnter={userRole !== 'viewer' ? onBannerDrag : undefined}
+                onDrop={userRole !== 'viewer' ? onBannerDrop : undefined}
+              >
                 {/* Drop banner for filesOnly context */}
                 {userRole !== 'viewer' && (
                   <div
@@ -175,7 +235,7 @@ const Dashboard = ({ user, userRole }) => {
                 )}
                 <FolderTree currentPath={currentPath} onPathChange={setCurrentPath} refreshTrigger={refreshTrigger} userRole={userRole} onFileSelect={handleFileSelect} filesOnly={true} />
                 {userRole !== 'viewer' && (
-                  <div style={{ marginTop: 12 }}>
+                  <div style={{ marginTop: 12 }} ref={uploaderPanelRef}>
                     <button className="action-btn" onClick={() => setCollapseUploader(v => !v)}>
                       {collapseUploader ? '▼' : '▲'} Upload panel
                     </button>
@@ -207,6 +267,15 @@ const Dashboard = ({ user, userRole }) => {
       </div>
 
   {/* Modal removed; using collapsible uploader panel instead */}
+      {/* Global drag-and-drop overlay */}
+      {userRole !== 'viewer' && dragOverlayVisible && (
+        <div className="drop-overlay" onDragOver={onBannerDrag} onDrop={onBannerDrop}>
+          <div className="drop-overlay-inner">
+            <div className="drop-overlay-icon">📥</div>
+            <div className="drop-overlay-text">Drop files to upload</div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

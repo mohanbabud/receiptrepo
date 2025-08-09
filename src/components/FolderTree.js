@@ -12,6 +12,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   // Removed Firestore-backed files/folders; relying on Storage data only
   const [expandedFolders, setExpandedFolders] = useState(new Set([ROOT_PATH]));
   const [fileSort, setFileSort] = useState('name');
+  const [fileSortDir, setFileSortDir] = useState('asc'); // 'asc' | 'desc'
   const [fileFilter, setFileFilter] = useState('');
   const [folderFilter, setFolderFilter] = useState('');
   const [filePage, setFilePage] = useState(1);
@@ -617,15 +618,17 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
 
   // helper to render only the file grid for a specific path
   const renderFilesForPath = (path) => {
+    const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
     let filteredFiles = storageFiles.filter(file => file.name !== '.keep' && file.name !== '.folder-placeholder' && file.path === path);
     if (fileFilter) {
       filteredFiles = filteredFiles.filter(file => file.name.toLowerCase().includes(fileFilter.toLowerCase()));
     }
     filteredFiles = filteredFiles.sort((a, b) => {
-      if (fileSort === 'name') return a.name.localeCompare(b.name);
-      if (fileSort === 'size') return a.size - b.size;
-      if (fileSort === 'type') return (a.type || '').localeCompare(b.type || '');
-      return 0;
+      let cmp = 0;
+      if (fileSort === 'name') cmp = collator.compare(a.name || '', b.name || '');
+      else if (fileSort === 'size') cmp = (a.size || 0) - (b.size || 0);
+      else if (fileSort === 'type') cmp = collator.compare(a.type || '', b.type || '');
+      return fileSortDir === 'asc' ? cmp : -cmp;
     });
     // Pagination
     const total = filteredFiles.length;
@@ -938,11 +941,21 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
           <input
             type="text"
             className="file-filter-input"
-            placeholder="Filter files..."
+            placeholder="Filter files by name..."
             value={fileFilter}
             onChange={e => setFileFilter(e.target.value)}
             style={{ marginRight: '8px' }}
           />
+          {fileFilter && (
+            <button
+              type="button"
+              title="Clear filter"
+              onClick={() => setFileFilter('')}
+              style={{ marginRight: 8 }}
+            >
+              ✕
+            </button>
+          )}
           {!filesOnly && (
             <input
               type="text"
@@ -958,6 +971,15 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
             <option value="size">Sort by Size</option>
             <option value="type">Sort by Type</option>
           </select>
+          <button
+            type="button"
+            className="file-sort-dir-toggle"
+            title={fileSortDir === 'asc' ? 'Sort Z→A' : 'Sort A→Z'}
+            onClick={() => setFileSortDir(d => (d === 'asc' ? 'desc' : 'asc'))}
+            style={{ marginLeft: 8 }}
+          >
+            {fileSort === 'name' ? (fileSortDir === 'asc' ? 'A→Z' : 'Z→A') : (fileSortDir === 'asc' ? '↑' : '↓')}
+          </button>
         </div>
       </div>
       {/* Context Menu UI */}
