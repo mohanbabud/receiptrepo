@@ -3,7 +3,7 @@ import { collection, query, onSnapshot, orderBy } from 'firebase/firestore';
 import { ref, listAll, getMetadata, getDownloadURL, uploadBytes, deleteObject } from 'firebase/storage';
 import { db, storage } from '../firebase';
 import StorageTreeView from './StorageTreeView';
-import { FaFolder, FaFolderOpen, FaFile, FaImage, FaFilePdf, FaFileAlt, FaVideo, FaMusic, FaTrash, FaEdit, FaCopy, FaCut } from 'react-icons/fa';
+import { FaFolder, FaFolderOpen, FaImage, FaFilePdf, FaFileAlt, FaVideo, FaMusic, FaTrash, FaEdit, FaCopy, FaCut } from 'react-icons/fa';
 import './FolderTree.css';
 
 const ROOT_PATH = '/files/';
@@ -29,6 +29,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   const [selection, setSelection] = useState({ type: 'background', target: null });
   const [clipboard, setClipboard] = useState(null); // { action: 'copy'|'cut', itemType: 'file'|'folder', payload }
   const [moveCopyModal, setMoveCopyModal] = useState({ open: false, mode: 'copy', itemType: null, target: null, dest: ROOT_PATH });
+  const [moveCopyBusy, setMoveCopyBusy] = useState(false);
 
   useEffect(() => {
     loadData();
@@ -476,6 +477,8 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     }
   };
 
+  const getParentFolderPath = (fileItem) => normalizeFolderPath(fileItem?.path || ROOT_PATH);
+
   // Folder copy/move (recursive)
   const copyFolder = async (srcFolderPath, destFolderPath, removeOriginal = false) => {
     const src = normalizeFolderPath(srcFolderPath);
@@ -849,7 +852,10 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
       )}
   <div className="tree-content">{renderFolderTree(ROOT_PATH, 0)}</div>
       {moveCopyModal.open && (
-        <div className="move-copy-modal" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10002 }}>
+        <div className="move-copy-modal" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10002 }} onKeyDown={(e) => {
+          if (e.key === 'Escape') setMoveCopyModal({ open: false, mode: 'copy', itemType: null, target: null, dest: ROOT_PATH });
+          if (e.key === 'Enter') (document.getElementById('confirm-move-copy') || {}).click?.();
+        }}>
           <div style={{ background: '#fff', width: '840px', maxWidth: '95vw', maxHeight: '90vh', borderRadius: 8, overflow: 'hidden', boxShadow: '0 12px 28px rgba(0,0,0,0.25)' }}>
             <div style={{ padding: '12px 16px', borderBottom: '1px solid #eee', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <div style={{ fontWeight: 600 }}>
@@ -878,13 +884,27 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
               <div style={{ padding: 16 }}>
                 <div style={{ marginBottom: 8, color: '#666', fontSize: 13 }}>Destination</div>
                 <input type="text" value={moveCopyModal.dest} onChange={e => setMoveCopyModal(prev => ({ ...prev, dest: e.target.value }))} style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #ccc' }} />
+                <div style={{ marginTop: 12, padding: '8px 10px', background: '#fafafa', border: '1px solid #eee', borderRadius: 6, fontSize: 13, color: '#555' }}>
+                  <div><strong>Item:</strong> {moveCopyModal.itemType === 'file' ? moveCopyModal.target?.name : (moveCopyModal.target || '').split('/').filter(Boolean).pop()}</div>
+                  <div><strong>Action:</strong> {moveCopyModal.mode === 'copy' ? 'Copy' : 'Move'}</div>
+                </div>
                 <div style={{ marginTop: 16, display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                  <button onClick={() => setMoveCopyModal({ open: false, mode: 'copy', itemType: null, target: null, dest: ROOT_PATH })} style={{ padding: '8px 12px' }}>Cancel</button>
+                  <button onClick={() => setMoveCopyModal({ open: false, mode: 'copy', itemType: null, target: null, dest: ROOT_PATH })} style={{ padding: '8px 12px' }} disabled={moveCopyBusy}>Cancel</button>
                   <button
+                    id="confirm-move-copy"
                     onClick={async () => {
                       const dest = moveCopyModal.dest;
                       if (!dest) return;
+                      // Guard against no-op moves (same folder)
+                      if (moveCopyModal.itemType === 'file') {
+                        const cur = getParentFolderPath(moveCopyModal.target);
+                        if (normalizeFolderPath(dest) === normalizeFolderPath(cur) && moveCopyModal.mode === 'move') { setMoveCopyModal({ open: false, mode: 'copy', itemType: null, target: null, dest: ROOT_PATH }); return; }
+                      } else if (moveCopyModal.itemType === 'folder') {
+                        const cur = normalizeFolderPath(moveCopyModal.target);
+                        if (normalizeFolderPath(dest) === normalizeFolderPath(cur) && moveCopyModal.mode === 'move') { setMoveCopyModal({ open: false, mode: 'copy', itemType: null, target: null, dest: ROOT_PATH }); return; }
+                      }
                       try {
+                        setMoveCopyBusy(true);
                         if (moveCopyModal.itemType === 'file') {
                           if (moveCopyModal.mode === 'copy') await handleCopyFileTo(moveCopyModal.target, dest);
                           else await handleMoveFileTo(moveCopyModal.target, dest);
@@ -894,11 +914,14 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                         setMoveCopyModal({ open: false, mode: 'copy', itemType: null, target: null, dest: ROOT_PATH });
                       } catch (e) {
                         // Error is surfaced via inner functions
+                      } finally {
+                        setMoveCopyBusy(false);
                       }
                     }}
-                    style={{ padding: '8px 12px', background: '#0b5ed7', color: '#fff', border: 'none', borderRadius: 6 }}
+                    disabled={moveCopyBusy}
+                    style={{ padding: '8px 12px', background: moveCopyBusy ? '#6ea8fe' : '#0b5ed7', color: '#fff', border: 'none', borderRadius: 6 }}
                   >
-                    {moveCopyModal.mode === 'copy' ? 'Copy here' : 'Move here'}
+                    {moveCopyBusy ? 'Working…' : (moveCopyModal.mode === 'copy' ? 'Copy here' : 'Move here')}
                   </button>
                 </div>
               </div>
