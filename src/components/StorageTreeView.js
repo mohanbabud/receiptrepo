@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { ref, listAll } from 'firebase/storage';
 import { storage } from '../firebase';
 import { FaFolder, FaFolderOpen, FaFile, FaExpand, FaCompress } from 'react-icons/fa';
@@ -12,16 +12,11 @@ const StorageTreeView = ({ onFolderSelect, currentPath, refreshTrigger }) => {
   const [loading, setLoading] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
-  useEffect(() => {
-    loadStorageStructure();
-  }, [refreshTrigger]); // Re-load when refreshTrigger changes
-
-  const loadStorageStructure = async () => {
+  const loadStorageStructure = useCallback(async () => {
     try {
       setLoading(true);
       const structure = await buildStorageTree(ROOT_PATH);
       setTreeData(structure);
-      // Auto expand root if it has folders
       if (structure.folders && Object.keys(structure.folders).length > 0) {
         setExpandedNodes(new Set([ROOT_PATH]));
       }
@@ -30,7 +25,13 @@ const StorageTreeView = ({ onFolderSelect, currentPath, refreshTrigger }) => {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    loadStorageStructure();
+  }, [refreshTrigger, loadStorageStructure]);
+
+  
 
   const buildStorageTree = async (path) => {
     try {
@@ -156,16 +157,7 @@ const StorageTreeView = ({ onFolderSelect, currentPath, refreshTrigger }) => {
   };
 
   const renderTreeNode = (node, path = ROOT_PATH, level = 0) => {
-    if (!node) {
-      console.log('⚠️ renderTreeNode called with null node');
-      return null;
-    }
-
-    console.log(`🖥️ Rendering node at path "${path}" level ${level}:`, {
-      folders: Object.keys(node.folders || {}),
-      files: (node.files || []).length,
-      hasChildren: node.children ? Object.keys(node.children.folders || {}).length : 0
-    });
+  if (!node) return null;
 
     const isExpanded = expandedNodes.has(path);
     const isSelected = currentPath === path;
@@ -174,7 +166,7 @@ const StorageTreeView = ({ onFolderSelect, currentPath, refreshTrigger }) => {
     const hasChildren = (node.children && Object.keys(node.children.folders).length > 0) || 
                        (node.folders && Object.keys(node.folders).length > 0);
 
-    console.log(`📊 Node "${path}" - expanded: ${isExpanded}, hasChildren: ${hasChildren}, selected: ${isSelected}`);
+    
 
     return (
       <div key={path} className="tree-node" style={{ marginLeft: `${level * 20}px` }}>
@@ -295,21 +287,12 @@ const StorageTreeView = ({ onFolderSelect, currentPath, refreshTrigger }) => {
             <p>Upload some files to see the tree structure</p>
           </div>
         ) : (
-          (() => {
-            console.log('🎨 Main render - treeData:', treeData);
-            console.log('🎨 About to render root node with:', { 
-              folders: Object.keys(treeData.folders || {}), 
-              files: (treeData.files || []).length,
-              children: treeData.children ? Object.keys(treeData.children.folders || {}) : 'none'
-            });
-            
-            return treeData && renderTreeNode({ 
-              folders: treeData.folders || {}, 
-              files: treeData.files || [],
-              children: treeData.children,
-              name: 'PNLM'
-            }, ROOT_PATH, 0);
-          })()
+          (treeData && renderTreeNode({ 
+            folders: treeData.folders || {}, 
+            files: treeData.files || [],
+            children: treeData.children,
+            name: 'PNLM'
+          }, ROOT_PATH, 0))
         )}
       </div>
 

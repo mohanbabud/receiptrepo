@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { collection, query, onSnapshot, orderBy } from 'firebase/firestore';
 import { ref, listAll, getMetadata, getDownloadURL, uploadBytes, deleteObject } from 'firebase/storage';
 import { db, storage } from '../firebase';
-import { FaFolder, FaFolderOpen, FaFile, FaImage, FaFilePdf, FaFileAlt, FaVideo, FaMusic, FaTrash } from 'react-icons/fa';
+import StorageTreeView from './StorageTreeView';
+import { FaFolder, FaFolderOpen, FaFile, FaImage, FaFilePdf, FaFileAlt, FaVideo, FaMusic, FaTrash, FaEdit, FaCopy, FaCut } from 'react-icons/fa';
 import './FolderTree.css';
 
 const ROOT_PATH = '/files/';
@@ -25,6 +26,9 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   const [showSuccessPopup, setShowSuccessPopup] = useState(false); // Keeping this for context
   const [successMessage, setSuccessMessage] = useState(''); // Keeping this for context
   const [isError, setIsError] = useState(false); // Keeping this for context
+  const [selection, setSelection] = useState({ type: 'background', target: null });
+  const [clipboard, setClipboard] = useState(null); // { action: 'copy'|'cut', itemType: 'file'|'folder', payload }
+  const [moveCopyModal, setMoveCopyModal] = useState({ open: false, mode: 'copy', itemType: null, target: null, dest: ROOT_PATH });
 
   useEffect(() => {
     loadData();
@@ -154,18 +158,172 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   const handleContextMenu = (e, target, type) => {
     e.preventDefault();
     setContextMenu({ visible: true, x: e.clientX, y: e.clientY, target, type });
+  setSelection({ type, target });
   };
   const hideContextMenu = () => setContextMenu({ visible: false, x: 0, y: 0, target: null, type: null });
-  const handleMenuAction = (action) => {
-    if (action === 'rename' && contextMenu.target) {
-      setRenamingFolder(contextMenu.target);
-      setRenameFolderName(contextMenu.target.split('/').filter(Boolean).pop());
-    } else if (action === 'create') {
-      setShowNewFolderInput(true);
-    } else if (action === 'delete' && contextMenu.target) {
-      handleDeleteFolder(contextMenu.target);
+  const handleMenuAction = async (action) => {
+    try {
+      if (contextMenu.type === 'folder') {
+        const folderPath = contextMenu.target;
+        if (action === 'rename') {
+          setRenamingFolder(folderPath);
+          setRenameFolderName(folderPath.split('/').filter(Boolean).pop());
+        } else if (action === 'create-folder') {
+          setShowNewFolderInput(true);
+        } else if (action === 'create-file') {
+          await handleNewFile(folderPath);
+        } else if (action === 'delete') {
+          if (userRole !== 'admin') { alert('Only admin can delete.'); hideContextMenu(); return; }
+          await handleDeleteFolder(folderPath);
+        } else if (action === 'copy') {
+          setMoveCopyModal({ open: true, mode: 'copy', itemType: 'folder', target: folderPath, dest: normalizeFolderPath(currentPath || ROOT_PATH) });
+        } else if (action === 'move') {
+          setMoveCopyModal({ open: true, mode: 'move', itemType: 'folder', target: folderPath, dest: normalizeFolderPath(currentPath || ROOT_PATH) });
+        } else if (action === 'details') {
+          await showFolderDetails(folderPath);
+        }
+      } else if (contextMenu.type === 'file') {
+        const fileItem = contextMenu.target; // storageFiles entry
+        if (!fileItem) return;
+        if (action === 'rename') {
+          await handleRenameFile(fileItem);
+        } else if (action === 'delete') {
+          if (userRole !== 'admin') { alert('Only admin can delete.'); hideContextMenu(); return; }
+          await handleDeleteFile(fileItem);
+        } else if (action === 'copy') {
+          setMoveCopyModal({ open: true, mode: 'copy', itemType: 'file', target: fileItem, dest: normalizeFolderPath(currentPath || ROOT_PATH) });
+        } else if (action === 'move') {
+          setMoveCopyModal({ open: true, mode: 'move', itemType: 'file', target: fileItem, dest: normalizeFolderPath(currentPath || ROOT_PATH) });
+        } else if (action === 'details') {
+          showFileDetails(fileItem);
+        } else if (action === 'create-file') {
+          await handleNewFile(currentPath);
+        } else if (action === 'create-folder') {
+          setShowNewFolderInput(true);
+        }
+      } else if (contextMenu.type === 'background') {
+        if (action === 'create-folder') setShowNewFolderInput(true);
+        if (action === 'create-file') await handleNewFile(currentPath);
+      }
+    } finally {
+      hideContextMenu();
     }
-    hideContextMenu();
+  };
+
+  const normalizeFolderPath = (inputPath) => {
+    let p = String(inputPath || '').trim();
+    if (!p) return ROOT_PATH;
+    // Ensure starts with '/files/' and ends with '/'
+    p = p.replace(/\\/g, '/');
+    if (!p.startsWith('/')) p = '/' + p;
+    if (!p.startsWith('/files/')) p = '/files' + (p === '/' ? '/' : p);
+    if (!p.endsWith('/')) p += '/';
+    return p.replace(/\/+/g, '/');
+  };
+
+  const handleNewFile = async (folderPath) => {
+    if (userRole === 'viewer') { alert('You do not have permission to create files.'); return; }
+    const name = prompt('Enter new file name (e.g., note.txt):');
+    if (!name || !name.trim()) return;
+    const safeFolder = normalizeFolderPath(folderPath || currentPath);
+    const objectPath = `${safeFolder}${name.trim().replace(/^\/+|\/+$/g, '')}`.replace(/^\/+/, '');
+    try {
+      const fileRef = ref(storage, objectPath);
+      await uploadBytes(fileRef, new Uint8Array());
+      setSuccessMessage('File created');
+      setIsError(false);
+      setShowSuccessPopup(true);
+      await loadData();
+    } catch (err) {
+      setIsError(true);
+      setSuccessMessage('Error creating file: ' + (err.message || err.toString()));
+      setShowSuccessPopup(true);
+    }
+  };
+
+  // Keyboard shortcuts for selection
+  const handleKeyDown = async (e) => {
+    const key = e.key;
+    const ctrl = e.ctrlKey || e.metaKey;
+    // New Folder
+    if (ctrl && !e.shiftKey && key.toLowerCase() === 'n') {
+      e.preventDefault();
+      setShowNewFolderInput(true);
+      return;
+    }
+    // New File
+    if (ctrl && e.shiftKey && key.toLowerCase() === 'n') {
+      e.preventDefault();
+      await handleNewFile(currentPath);
+      return;
+    }
+    // Rename
+    if (key === 'F2') {
+      e.preventDefault();
+      if (selection.type === 'folder' && selection.target) {
+        setRenamingFolder(selection.target);
+        setRenameFolderName(selection.target.split('/').filter(Boolean).pop());
+      } else if (selection.type === 'file' && selection.target) {
+        await handleRenameFile(selection.target);
+      }
+      return;
+    }
+    // Delete (admin only)
+    if (key === 'Delete') {
+      e.preventDefault();
+      if (userRole !== 'admin') return;
+      if (selection.type === 'folder' && selection.target) {
+        await handleDeleteFolder(selection.target);
+      } else if (selection.type === 'file' && selection.target) {
+        await handleDeleteFile(selection.target);
+      }
+      return;
+    }
+    // Copy
+    if (ctrl && key.toLowerCase() === 'c') {
+      e.preventDefault();
+      if (selection.type === 'folder' && selection.target) setClipboard({ action: 'copy', itemType: 'folder', payload: selection.target });
+      if (selection.type === 'file' && selection.target) setClipboard({ action: 'copy', itemType: 'file', payload: selection.target });
+      return;
+    }
+    // Cut (move)
+    if (ctrl && key.toLowerCase() === 'x') {
+      e.preventDefault();
+      if (selection.type === 'folder' && selection.target) setClipboard({ action: 'cut', itemType: 'folder', payload: selection.target });
+      if (selection.type === 'file' && selection.target) setClipboard({ action: 'cut', itemType: 'file', payload: selection.target });
+      return;
+    }
+    // Paste
+    if (ctrl && key.toLowerCase() === 'v') {
+      e.preventDefault();
+      if (!clipboard) return;
+      const destFolder = normalizeFolderPath(currentPath);
+      try {
+        if (clipboard.itemType === 'file') {
+          const fileItem = clipboard.payload;
+          const dest = `${destFolder}${fileItem.name}`;
+          const data = await import('firebase/storage').then(mod => mod.getBytes(fileItem.ref));
+          const destRef = ref(storage, dest.replace(/^\/+/, ''));
+          await uploadBytes(destRef, data);
+          if (clipboard.action === 'cut') {
+            await deleteObject(fileItem.ref);
+          }
+        } else if (clipboard.itemType === 'folder') {
+          const srcFolderPath = clipboard.payload;
+          await copyFolder(srcFolderPath, destFolder, clipboard.action === 'cut');
+        }
+        setClipboard(null);
+        await loadData();
+        setSuccessMessage('Paste completed');
+        setIsError(false);
+        setShowSuccessPopup(true);
+      } catch (e2) {
+        setIsError(true);
+        setSuccessMessage('Error pasting: ' + (e2.message || e2.toString()));
+        setShowSuccessPopup(true);
+      }
+      return;
+    }
   };
 
   // Rename folder in Firebase Storage
@@ -207,6 +365,185 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
       setShowSuccessPopup(true);
       console.error('Error renaming folder:', error);
     }
+  };
+
+  // File operations
+  const handleRenameFile = async (fileItem) => {
+    const oldFull = fileItem.ref.fullPath; // e.g., files/a/b/name.ext
+    const newName = prompt('Enter new file name:', fileItem.name);
+    if (!newName || !newName.trim()) return;
+    const newFull = oldFull.replace(/[^/]+$/, newName.trim());
+    try {
+      const fileBytes = await import('firebase/storage').then(mod => mod.getBytes(fileItem.ref));
+      const newRef = ref(storage, newFull);
+      await uploadBytes(newRef, fileBytes);
+      await deleteObject(fileItem.ref);
+      setSuccessMessage('File renamed successfully!');
+      setShowSuccessPopup(true);
+      await loadData();
+    } catch (error) {
+      setIsError(true);
+      setSuccessMessage('Error renaming file: ' + (error.message || error.toString()));
+      setShowSuccessPopup(true);
+    }
+  };
+
+  const handleDeleteFile = async (fileItem) => {
+    try {
+      await deleteObject(fileItem.ref);
+      setSuccessMessage('File deleted successfully!');
+      setShowSuccessPopup(true);
+      await loadData();
+    } catch (error) {
+      setIsError(true);
+      setSuccessMessage('Error deleting file');
+      setShowSuccessPopup(true);
+    }
+  };
+
+  const handleCopyFile = async (fileItem) => {
+    const destFolder = prompt('Copy to folder under /files (e.g., /files/Target/Sub):', currentPath || ROOT_PATH);
+    if (!destFolder) return;
+    const dest = normalizeFolderPath(destFolder) + fileItem.name;
+    try {
+      const data = await import('firebase/storage').then(mod => mod.getBytes(fileItem.ref));
+      const destRef = ref(storage, dest.replace(/^\/+/, ''));
+      await uploadBytes(destRef, data);
+      setSuccessMessage('File copied');
+      setIsError(false);
+      setShowSuccessPopup(true);
+      await loadData();
+    } catch (e) {
+      setIsError(true);
+      setSuccessMessage('Error copying file: ' + (e.message || e.toString()));
+      setShowSuccessPopup(true);
+    }
+  };
+
+  const handleMoveFile = async (fileItem) => {
+    const destFolder = prompt('Move to folder under /files (e.g., /files/Target/Sub):', currentPath || ROOT_PATH);
+    if (!destFolder) return;
+    const dest = normalizeFolderPath(destFolder) + fileItem.name;
+    try {
+      const data = await import('firebase/storage').then(mod => mod.getBytes(fileItem.ref));
+      const destRef = ref(storage, dest.replace(/^\/+/, ''));
+      await uploadBytes(destRef, data);
+      await deleteObject(fileItem.ref);
+      setSuccessMessage('File moved');
+      setIsError(false);
+      setShowSuccessPopup(true);
+      await loadData();
+    } catch (e) {
+      setIsError(true);
+      setSuccessMessage('Error moving file: ' + (e.message || e.toString()));
+      setShowSuccessPopup(true);
+    }
+  };
+
+  // Destination-aware helpers used by modal
+  const handleCopyFileTo = async (fileItem, destFolder) => {
+    const dest = normalizeFolderPath(destFolder) + fileItem.name;
+    try {
+      const data = await import('firebase/storage').then(mod => mod.getBytes(fileItem.ref));
+      const destRef = ref(storage, dest.replace(/^\/+/, ''));
+      await uploadBytes(destRef, data);
+      setSuccessMessage('File copied');
+      setIsError(false);
+      setShowSuccessPopup(true);
+      await loadData();
+    } catch (e) {
+      setIsError(true);
+      setSuccessMessage('Error copying file: ' + (e.message || e.toString()));
+      setShowSuccessPopup(true);
+    }
+  };
+
+  const handleMoveFileTo = async (fileItem, destFolder) => {
+    const dest = normalizeFolderPath(destFolder) + fileItem.name;
+    try {
+      const data = await import('firebase/storage').then(mod => mod.getBytes(fileItem.ref));
+      const destRef = ref(storage, dest.replace(/^\/+/, ''));
+      await uploadBytes(destRef, data);
+      await deleteObject(fileItem.ref);
+      setSuccessMessage('File moved');
+      setIsError(false);
+      setShowSuccessPopup(true);
+      await loadData();
+    } catch (e) {
+      setIsError(true);
+      setSuccessMessage('Error moving file: ' + (e.message || e.toString()));
+      setShowSuccessPopup(true);
+    }
+  };
+
+  // Folder copy/move (recursive)
+  const copyFolder = async (srcFolderPath, destFolderPath, removeOriginal = false) => {
+    const src = normalizeFolderPath(srcFolderPath);
+    const dst = normalizeFolderPath(destFolderPath);
+    if (dst.startsWith(src)) {
+      alert('Destination cannot be inside the source folder.');
+      return;
+    }
+    try {
+      const walk = async (fromPath, toPath) => {
+        const fromRef = ref(storage, fromPath.replace(/^\/+/, ''));
+        const result = await listAll(fromRef);
+        // Copy files
+        for (const item of result.items) {
+          const bytes = await import('firebase/storage').then(mod => mod.getBytes(item));
+          const rel = item.fullPath.substring(src.length).replace(/^\/+/, '');
+          const toFile = (toPath + rel).replace(/^\/+/, '');
+          const toRef = ref(storage, toFile);
+          await uploadBytes(toRef, bytes);
+          if (removeOriginal) {
+            await deleteObject(item);
+          }
+        }
+        // Recurse folders
+        for (const prefix of result.prefixes) {
+          const relFolder = prefix.fullPath.substring(src.length);
+          await walk(prefix.fullPath, (dst + relFolder).replace(/\/+/g, '/'));
+          if (removeOriginal) {
+            // Try to delete any .keep if exists
+            try { await deleteObject(ref(storage, prefix.fullPath + '/.keep')); } catch (e) {}
+          }
+        }
+      };
+      await walk(src, dst);
+      setSuccessMessage(removeOriginal ? 'Folder moved successfully!' : 'Folder copied successfully!');
+      setIsError(false);
+      setShowSuccessPopup(true);
+      await loadData();
+    } catch (e) {
+      setIsError(true);
+      setSuccessMessage('Error processing folder: ' + (e.message || e.toString()));
+      setShowSuccessPopup(true);
+    }
+  };
+
+  const showFolderDetails = async (folderPath) => {
+    try {
+      const base = normalizeFolderPath(folderPath);
+      const folderRef = ref(storage, base.replace(/^\/+/, ''));
+      // Shallow list only for quick stats
+      const res = await listAll(folderRef);
+      const filesHere = res.items.length;
+      const subfolders = res.prefixes.length;
+      alert(`Folder: ${base}\nSubfolders: ${subfolders}\nFiles (direct): ${filesHere}`);
+    } catch (e) {
+      alert('Error fetching details: ' + (e.message || e.toString()));
+    }
+  };
+
+  const showFileDetails = (fileItem) => {
+    const info = [
+      `Name: ${fileItem.name}`,
+      `Path: ${fileItem.path}`,
+      `Size: ${formatFileSize(fileItem.size)}`,
+      `Type: ${fileItem.type || 'unknown'}`,
+      `Uploaded: ${fileItem.uploadedAt || 'unknown'}`
+    ].join('\n');
+    alert(info);
   };
 
   // Delete folder and its contents in Firebase Storage
@@ -290,6 +627,33 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                 <span className="folder-name">{folderName}</span>
                 <span className="folder-count">({filesInFolder})</span>
               </div>
+              {userRole !== 'viewer' && (
+                <div className="folder-actions" style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto', paddingRight: 8 }} onClick={e => e.stopPropagation()}>
+                  <button className="icon-btn rename" title="Rename" onClick={async () => {
+                    const newName = prompt('Enter new folder name:', folderName);
+                    if (!newName || !newName.trim() || newName.trim() === folderName) return;
+                    const newPath = folderPath.replace(/[^/]+\/$/, newName.trim() + '/');
+                    await copyFolder(folderPath, newPath, true);
+                  }}>
+                    <FaEdit />
+                  </button>
+                  <button className="icon-btn copy" title="Copy" onClick={() => {
+                    setMoveCopyModal({ open: true, mode: 'copy', itemType: 'folder', target: folderPath, dest: normalizeFolderPath(currentPath || ROOT_PATH) });
+                  }}>
+                    <FaCopy />
+                  </button>
+                  <button className="icon-btn move" title="Move" onClick={() => {
+                    setMoveCopyModal({ open: true, mode: 'move', itemType: 'folder', target: folderPath, dest: normalizeFolderPath(currentPath || ROOT_PATH) });
+                  }}>
+                    <FaCut />
+                  </button>
+                  {userRole === 'admin' && (
+                    <button className="icon-btn delete" title="Delete" onClick={async () => { await handleDeleteFolder(folderPath); }}>
+                      <FaTrash />
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
             {isExpanded && renderFolderTree(folderPath, level + 1)}
           </div>
@@ -314,13 +678,37 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
             <div className="empty-state">No files found.</div>
           ) : (
             filteredFiles.map(file => (
-              <div key={file.id} className="file-grid-item" onClick={() => onFileSelect && onFileSelect(file)} title={file.name}>
+              <div
+                key={file.id}
+                className={`file-grid-item ${selection.type === 'file' && selection.target?.id === file.id ? 'selected' : ''}`}
+                onClick={() => { onFileSelect && onFileSelect(file); setSelection({ type: 'file', target: file }); }}
+                onContextMenu={e => handleContextMenu(e, file, 'file')}
+                title={file.name}
+              >
                 <div className="item-content">
                   {getFileIcon(file.name, file.type)}
                   <span className="file-name" title={file.name}>{file.name}</span>
                   <span className="file-size">{formatFileSize(file.size)}</span>
                   {file.isStorageFile && <span className="storage-badge" title="File in Firebase Storage">Storage</span>}
                 </div>
+                {userRole !== 'viewer' && (
+                  <div className="file-actions" style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto', paddingRight: 8 }} onClick={e => e.stopPropagation()}>
+                    <button className="icon-btn rename" title="Rename" onClick={async () => { await handleRenameFile(file); }}>
+                      <FaEdit />
+                    </button>
+                    <button className="icon-btn copy" title="Copy" onClick={() => { setMoveCopyModal({ open: true, mode: 'copy', itemType: 'file', target: file, dest: normalizeFolderPath(currentPath || ROOT_PATH) }); }}>
+                      <FaCopy />
+                    </button>
+                    <button className="icon-btn move" title="Move" onClick={() => { setMoveCopyModal({ open: true, mode: 'move', itemType: 'file', target: file, dest: normalizeFolderPath(currentPath || ROOT_PATH) }); }}>
+                      <FaCut />
+                    </button>
+                    {userRole === 'admin' && (
+                      <button className="icon-btn delete" title="Delete" onClick={async () => { await handleDeleteFile(file); }}>
+                        <FaTrash />
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
             ))
           )}
@@ -333,12 +721,37 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   if (loading) return <div className="loading">Loading files...</div>;
 
   return (
-    <div className="folder-tree">
+  <div className="folder-tree" tabIndex={0} onKeyDown={handleKeyDown}>
       <div className="tree-header" onContextMenu={e => handleContextMenu(e, currentPath, 'background')}>
         <div className="breadcrumb-path">
           <span className="path-label">📁</span>
           <div className="breadcrumb-nav">
-            {/* Breadcrumbs */}
+            {(() => {
+              // Build breadcrumbs from currentPath
+              const safe = normalizeFolderPath(currentPath);
+              const parts = safe.replace(/^\/files\/?/, '').split('/').filter(Boolean);
+              const crumbs = [{ label: 'PNLM', path: ROOT_PATH }];
+              let acc = ROOT_PATH;
+              parts.forEach(p => {
+                acc = acc + p + '/';
+                crumbs.push({ label: p, path: acc });
+              });
+              return crumbs.map((c, idx) => (
+                <span key={c.path} className="breadcrumb-item">
+                  <button
+                    type="button"
+                    className={`breadcrumb-link ${currentPath === c.path ? 'active' : ''}`}
+                    onClick={() => {
+                      setExpandedFolders(prev => new Set(prev).add(c.path));
+                      onPathChange(c.path);
+                    }}
+                  >
+                    {c.label}
+                  </button>
+                  {idx < crumbs.length - 1 && <span className="breadcrumb-separator">/</span>}
+                </span>
+              ));
+            })()}
           </div>
         </div>
         <div className="tree-controls">
@@ -359,27 +772,40 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
       </div>
       {/* Context Menu UI */}
       {contextMenu.visible && (
-        <div className="context-menu" style={{ position: 'fixed', top: contextMenu.y, left: contextMenu.x, zIndex: 9999, background: '#fff', border: '1px solid #ccc', borderRadius: '6px', boxShadow: '0 4px 16px rgba(0,0,0,0.18)', minWidth: '160px', padding: '4px 0' }} onMouseLeave={hideContextMenu}>
+        <div className="context-menu" style={{ position: 'fixed', top: contextMenu.y, left: contextMenu.x, zIndex: 9999, background: '#fff', border: '1px solid #ccc', borderRadius: '6px', boxShadow: '0 4px 16px rgba(0,0,0,0.18)', minWidth: '200px', padding: '4px 0' }} onMouseLeave={hideContextMenu}>
           {contextMenu.type === 'folder' && (
             <>
               <div className="context-menu-title" style={{ padding: '8px 16px', fontWeight: 'bold', color: '#444', borderBottom: '1px solid #eee' }}>Folder Actions</div>
-              <div className="context-menu-item" style={{ display: 'flex', alignItems: 'center', padding: '8px 16px', cursor: 'pointer', gap: '8px' }} onClick={() => handleMenuAction('rename')}>
-                <FaFolderOpen style={{ color: '#007bff' }} /> Rename Folder
-              </div>
-              <div className="context-menu-item" style={{ display: 'flex', alignItems: 'center', padding: '8px 16px', cursor: 'pointer', gap: '8px', color: '#d9534f' }} onClick={() => handleMenuAction('delete')}>
-                <FaTrash style={{ color: '#d9534f' }} /> Delete Folder
-              </div>
-              <div className="context-menu-item" style={{ display: 'flex', alignItems: 'center', padding: '8px 16px', cursor: 'pointer', gap: '8px' }} onClick={() => handleMenuAction('create')}>
-                <FaFolder style={{ color: '#28a745' }} /> New Subfolder
-              </div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-folder')}>📁 New Subfolder</div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-file')}>📄 New File</div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('rename')}>✏️ Rename</div>
+              {userRole === 'admin' && (
+                <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer', color: '#d9534f' }} onClick={() => handleMenuAction('delete')}>🗑️ Delete</div>
+              )}
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('copy')}>📋 Copy</div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('move')}>📦 Move</div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('details')}>ℹ️ Details</div>
+            </>
+          )}
+          {contextMenu.type === 'file' && (
+            <>
+              <div className="context-menu-title" style={{ padding: '8px 16px', fontWeight: 'bold', color: '#444', borderBottom: '1px solid #eee' }}>File Actions</div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-file')}>📄 New File</div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-folder')}>📁 New Folder</div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('rename')}>✏️ Rename</div>
+              {userRole === 'admin' && (
+                <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer', color: '#d9534f' }} onClick={() => handleMenuAction('delete')}>🗑️ Delete</div>
+              )}
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('copy')}>📋 Copy</div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('move')}>📦 Move</div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('details')}>ℹ️ Details</div>
             </>
           )}
           {contextMenu.type === 'background' && (
             <>
-              <div className="context-menu-title" style={{ padding: '8px 16px', fontWeight: 'bold', color: '#444', borderBottom: '1px solid #eee' }}>Root Actions</div>
-              <div className="context-menu-item" style={{ display: 'flex', alignItems: 'center', padding: '8px 16px', cursor: 'pointer', gap: '8px' }} onClick={() => handleMenuAction('create')}>
-                <FaFolder style={{ color: '#28a745' }} /> New Folder
-              </div>
+              <div className="context-menu-title" style={{ padding: '8px 16px', fontWeight: 'bold', color: '#444', borderBottom: '1px solid #eee' }}>Here</div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-folder')}>📁 New Folder</div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-file')}>📄 New File</div>
             </>
           )}
         </div>
@@ -422,6 +848,64 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
         </div>
       )}
   <div className="tree-content">{renderFolderTree(ROOT_PATH, 0)}</div>
+      {moveCopyModal.open && (
+        <div className="move-copy-modal" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10002 }}>
+          <div style={{ background: '#fff', width: '840px', maxWidth: '95vw', maxHeight: '90vh', borderRadius: 8, overflow: 'hidden', boxShadow: '0 12px 28px rgba(0,0,0,0.25)' }}>
+            <div style={{ padding: '12px 16px', borderBottom: '1px solid #eee', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ fontWeight: 600 }}>
+                {moveCopyModal.mode === 'copy' ? 'Copy to…' : 'Move to…'}
+              </div>
+              <button onClick={() => setMoveCopyModal({ open: false, mode: 'copy', itemType: null, target: null, dest: ROOT_PATH })} style={{ border: 'none', background: 'transparent', fontSize: 18, cursor: 'pointer' }}>✕</button>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 0 }}>
+              <div style={{ padding: 12, borderRight: '1px solid #eee' }}>
+                <StorageTreeView
+                  currentPath={(moveCopyModal.dest || ROOT_PATH).replace(/^\/+/, '').replace(/\\/g,'/')}
+                  onFolderSelect={(p) => {
+                    // Normalize to '/files/.../' form
+                    const normalized = (() => {
+                      let pp = String(p || '').trim();
+                      pp = pp.replace(/\\/g, '/');
+                      if (!pp.startsWith('/')) pp = '/' + pp;
+                      if (!pp.startsWith('/files/')) pp = '/files' + (pp === '/' ? '/' : pp);
+                      if (!pp.endsWith('/')) pp += '/';
+                      return pp.replace(/\/+/, '/');
+                    })();
+                    setMoveCopyModal(prev => ({ ...prev, dest: normalized }));
+                  }}
+                />
+              </div>
+              <div style={{ padding: 16 }}>
+                <div style={{ marginBottom: 8, color: '#666', fontSize: 13 }}>Destination</div>
+                <input type="text" value={moveCopyModal.dest} onChange={e => setMoveCopyModal(prev => ({ ...prev, dest: e.target.value }))} style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #ccc' }} />
+                <div style={{ marginTop: 16, display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                  <button onClick={() => setMoveCopyModal({ open: false, mode: 'copy', itemType: null, target: null, dest: ROOT_PATH })} style={{ padding: '8px 12px' }}>Cancel</button>
+                  <button
+                    onClick={async () => {
+                      const dest = moveCopyModal.dest;
+                      if (!dest) return;
+                      try {
+                        if (moveCopyModal.itemType === 'file') {
+                          if (moveCopyModal.mode === 'copy') await handleCopyFileTo(moveCopyModal.target, dest);
+                          else await handleMoveFileTo(moveCopyModal.target, dest);
+                        } else if (moveCopyModal.itemType === 'folder') {
+                          await copyFolder(moveCopyModal.target, dest, moveCopyModal.mode === 'move');
+                        }
+                        setMoveCopyModal({ open: false, mode: 'copy', itemType: null, target: null, dest: ROOT_PATH });
+                      } catch (e) {
+                        // Error is surfaced via inner functions
+                      }
+                    }}
+                    style={{ padding: '8px 12px', background: '#0b5ed7', color: '#fff', border: 'none', borderRadius: 6 }}
+                  >
+                    {moveCopyModal.mode === 'copy' ? 'Copy here' : 'Move here'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -51,12 +51,34 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
     if (window.confirm(`Are you sure you want to delete "${file.name}"?`)) {
       setLoading(true);
       try {
+        // Resolve a safe, non-root storage path
+        const buildFullPath = () => {
+          let fp = file.fullPath || file?.ref?.fullPath || '';
+          if (!fp) {
+            let base = (file.path || '').trim();
+            base = base.replace(/^\/+/, ''); // drop leading '/'
+            if (base === '' || base === '/') base = 'files';
+            if (base === 'files/' || base === '/files' || base === '/files/') base = 'files';
+            if (!base.startsWith('files')) base = `files/${base}`;
+            if (!base.endsWith('/')) base += '/';
+            fp = `${base}${file.name}`;
+          }
+          return fp.replace(/^\/+/, '');
+        };
+
+        const safeFullPath = buildFullPath();
+        if (!safeFullPath || safeFullPath === '/' || safeFullPath === 'files' || safeFullPath === 'files/') {
+          throw new Error('Invalid file path for deletion');
+        }
+
         // Delete from Storage
-        const fileRef = ref(storage, file.fullPath);
+        const fileRef = ref(storage, safeFullPath);
         await deleteObject(fileRef);
         
-        // Delete from Firestore
-        await deleteDoc(doc(db, 'files', file.id));
+        // Delete from Firestore only if this is a Firestore-tracked file
+        if (!file.isStorageFile && file.id) {
+          try { await deleteDoc(doc(db, 'files', file.id)); } catch (_) {}
+        }
         
         onFileAction();
         onClose();

@@ -8,7 +8,6 @@ import FolderTree from './FolderTree';
 import FileUploader from './FileUploader';
 import FilePreview from './FilePreview';
 import StorageTreeView from './StorageTreeView';
-import StorageManager from './StorageManager';
 import './Dashboard.css';
 
 const Dashboard = ({ user, userRole }) => {
@@ -16,11 +15,6 @@ const Dashboard = ({ user, userRole }) => {
   const [selectedFile, setSelectedFile] = useState(null);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   // Focus the UI on folders/files, remove alternate views
-  const [storageStats, setStorageStats] = useState({
-    folderCount: 0,
-    fileCount: 0,
-    totalSize: 0
-  });
   const [showUploader, setShowUploader] = useState(false);
 
   const handleLogout = async () => {
@@ -78,17 +72,7 @@ const Dashboard = ({ user, userRole }) => {
   setShowUploader(true);
   };
 
-  const formatBytes = (bytes) => {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-  };
-
-  const updateStorageStats = (stats) => {
-    setStorageStats(stats);
-  };
+  // (stats UI removed)
 
   return (
     <div className="dashboard">
@@ -120,7 +104,7 @@ const Dashboard = ({ user, userRole }) => {
         <aside className="sidebar">
           <div className="sidebar-section">
             <h3>Folders</h3>
-            <StorageTreeView currentPath={currentPath} onFolderSelect={setCurrentPath} refreshTrigger={refreshTrigger} onStatsUpdate={updateStorageStats} />
+            <StorageTreeView currentPath={currentPath} onFolderSelect={setCurrentPath} refreshTrigger={refreshTrigger} />
           </div>
           
         </aside>
@@ -140,7 +124,7 @@ const Dashboard = ({ user, userRole }) => {
               </div>
             </section>
 
-            <aside className="right-panel">
+      <aside className="right-panel">
               {selectedFile ? (
                 <FilePreview 
                   file={selectedFile}
@@ -150,14 +134,7 @@ const Dashboard = ({ user, userRole }) => {
                   onFileAction={refreshFiles}
                 />
               ) : (
-                <>
-                  {userRole === 'admin' && (
-                    <div className="panel">
-                      <h3>Storage Tools</h3>
-                      <StorageManager onStructureChange={refreshFiles} />
-                    </div>
-                  )}
-                </>
+        <></>
               )}
             </aside>
           </div>
