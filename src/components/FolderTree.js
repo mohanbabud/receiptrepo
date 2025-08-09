@@ -5,11 +5,13 @@ import { db, storage } from '../firebase';
 import { FaFolder, FaFolderOpen, FaFile, FaImage, FaFilePdf, FaFileAlt, FaVideo, FaMusic, FaTrash } from 'react-icons/fa';
 import './FolderTree.css';
 
+const ROOT_PATH = '/files/';
+
 const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFileSelect }) => {
   // State
   const [files, setFiles] = useState([]);
   const [folders, setFolders] = useState(new Set());
-  const [expandedFolders, setExpandedFolders] = useState(new Set(['/']));
+  const [expandedFolders, setExpandedFolders] = useState(new Set([ROOT_PATH]));
   const [fileSort, setFileSort] = useState('name');
   const [fileFilter, setFileFilter] = useState('');
   const [storageFiles, setStorageFiles] = useState([]);
@@ -116,7 +118,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
       };
   // Only list under the permitted 'files/' root per storage.rules
   const storageRef = ref(storage, 'files/');
-  const result = await loadStorageRecursive(storageRef, '/files');
+  const result = await loadStorageRecursive(storageRef, ROOT_PATH.replace(/\/+$/, ''));
       setStorageFolders(result.folders);
       setStorageFiles(result.files);
     } catch (error) {
@@ -325,7 +327,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
         </div>
       );
     }
-    return <>{items}</>;
+  return <>{items}</>;
   };
 
   if (loading) return <div className="loading">Loading files...</div>;
@@ -419,7 +421,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
           <button style={{ marginLeft: '12px' }} onClick={() => setShowSuccessPopup(false)}>Close</button>
         </div>
       )}
-      <div className="tree-content">{renderFolderTree('/', 0)}</div>
+  <div className="tree-content">{renderFolderTree(ROOT_PATH, 0)}</div>
     </div>
   );
 };

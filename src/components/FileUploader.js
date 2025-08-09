@@ -38,11 +38,13 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole }) => {
       const fileId = generateFileId();
       const fileName = `${fileId}_${file.name}`;
       // Normalize currentPath to ensure a single 'files/' prefix
-      let base = (currentPath || '').trim();
+  let base = (currentPath || '').trim();
       // Drop leading slash
-      base = base.replace(/^\/+/, '');
+  base = base.replace(/^\/+/, '');
       // Map root or empty to 'files'
-      if (base === '' || base === '/') base = 'files';
+  if (base === '' || base === '/') base = 'files';
+  // Normalize '/files' and '/files/' to 'files'
+  if (base === 'files/' || base === '/files' || base === '/files/') base = 'files';
       // Ensure single 'files/' prefix (avoid 'filesfiles/...')
       if (base === 'files') {
         // ok

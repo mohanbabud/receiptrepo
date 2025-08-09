@@ -7,22 +7,21 @@ import { auth, storage, db } from '../firebase';
 import FolderTree from './FolderTree';
 import FileUploader from './FileUploader';
 import FilePreview from './FilePreview';
-import RequestPanel from './RequestPanel';
 import StorageTreeView from './StorageTreeView';
 import StorageManager from './StorageManager';
-import AdminSetup from './AdminSetup';
 import './Dashboard.css';
 
 const Dashboard = ({ user, userRole }) => {
-  const [currentPath, setCurrentPath] = useState('/');
+  const [currentPath, setCurrentPath] = useState('/files/');
   const [selectedFile, setSelectedFile] = useState(null);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
-  const [viewMode, setViewMode] = useState('list'); // 'list' or 'tree'
+  // Focus the UI on folders/files, remove alternate views
   const [storageStats, setStorageStats] = useState({
     folderCount: 0,
     fileCount: 0,
     totalSize: 0
   });
+  const [showUploader, setShowUploader] = useState(false);
 
   const handleLogout = async () => {
     try {
@@ -75,18 +74,8 @@ const Dashboard = ({ user, userRole }) => {
   };
 
   const handleUploadFiles = () => {
-    // Create a temporary file input to trigger file selection
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.multiple = true;
-    input.onchange = (e) => {
-      if (e.target.files && e.target.files.length > 0) {
-        // This would typically trigger the upload process
-        // For now, we'll just refresh
-        setRefreshTrigger(prev => prev + 1);
-      }
-    };
-    input.click();
+  // Open uploader modal
+  setShowUploader(true);
   };
 
   const formatBytes = (bytes) => {
@@ -104,7 +93,18 @@ const Dashboard = ({ user, userRole }) => {
   return (
     <div className="dashboard">
       <header className="header">
-        <h1>Firebase File Manager</h1>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16 }}>
+          <h1>Firebase File Manager</h1>
+          <div className="header-actions" style={{ display: 'flex', gap: 8 }}>
+            {userRole !== 'viewer' && (
+              <>
+                <button className="action-btn create-folder" onClick={handleCreateFolder}>📁 New Folder</button>
+                <button className="action-btn upload-files" onClick={handleUploadFiles}>📤 Upload</button>
+                <button className="action-btn refresh-all" onClick={() => setRefreshTrigger(prev => prev + 1)}>🔄 Refresh</button>
+              </>
+            )}
+          </div>
+        </div>
         <div className="header-info">
           <div className="user-info">
             <span>Welcome, {user.email}</span>
@@ -113,101 +113,14 @@ const Dashboard = ({ user, userRole }) => {
           {userRole === 'admin' && (
             <Link to="/admin" className="admin-link">Admin Panel</Link>
           )}
-          <Link to="/tree-view" className="tree-view-link">🌳 Full Tree View</Link>
           <button onClick={handleLogout} className="logout-btn">Logout</button>
         </div>
       </header>
       <div className="main-content">
         <aside className="sidebar">
           <div className="sidebar-section">
-            <h3>Current Location</h3>
-            <div className="current-location">
-              <span className="location-icon">📍</span>
-              <span className="location-path">{currentPath === '/' ? '' : currentPath}</span>
-            </div>
-          </div>
-
-          <div className="sidebar-section">
-            <h3>Quick Stats</h3>
-            <div className="stats-grid">
-              <div className="stat-item">
-                <span className="stat-icon">📁</span>
-                <div className="stat-info">
-                  <span className="stat-number">{storageStats.folderCount}</span>
-                  <span className="stat-label">Folders</span>
-                </div>
-              </div>
-              <div className="stat-item">
-                <span className="stat-icon">📄</span>
-                <div className="stat-info">
-                  <span className="stat-number">{storageStats.fileCount}</span>
-                  <span className="stat-label">Files</span>
-                </div>
-              </div>
-              <div className="stat-item">
-                <span className="stat-icon">💾</span>
-                <div className="stat-info">
-                  <span className="stat-number">{formatBytes(storageStats.totalSize)}</span>
-                  <span className="stat-label">Storage Used</span>
-                </div>
-              </div>
-              <div className="stat-item">
-                <span className="stat-icon">👤</span>
-                <div className="stat-info">
-                  <span className="stat-number">{userRole}</span>
-                  <span className="stat-label">Role</span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="sidebar-section">
-            <h3>Quick Actions</h3>
-            <div className="quick-actions">
-              {userRole !== 'viewer' && (
-                <>
-                  <button className="action-btn create-folder" onClick={handleCreateFolder}>
-                    <span className="action-icon">📁+</span>
-                    <span>New Folder</span>
-                  </button>
-                  <button className="action-btn upload-files" onClick={handleUploadFiles}>
-                    <span className="action-icon">📤</span>
-                    <span>Upload Files</span>
-                  </button>
-                </>
-              )}
-              <button className="action-btn refresh-all" onClick={() => setRefreshTrigger(prev => prev + 1)}>
-                <span className="action-icon">🔄</span>
-                <span>Refresh All</span>
-              </button>
-            </div>
-          </div>
-
-          <div className="sidebar-section">
-            <h3>Recent Activity</h3>
-            <div className="recent-activity">
-              <div className="activity-item">
-                <span className="activity-icon">📁</span>
-                <div className="activity-info">
-                  <span className="activity-text">Created folder "Jogipet"</span>
-                  <span className="activity-time">2 hours ago</span>
-                </div>
-              </div>
-              <div className="activity-item">
-                <span className="activity-icon">📁</span>
-                <div className="activity-info">
-                  <span className="activity-text">Created folder "Aler"</span>
-                  <span className="activity-time">3 hours ago</span>
-                </div>
-              </div>
-              <div className="activity-item">
-                <span className="activity-icon">📁</span>
-                <div className="activity-info">
-                  <span className="activity-text">Created folder "Sadasivpet"</span>
-                  <span className="activity-time">1 day ago</span>
-                </div>
-              </div>
-            </div>
+            <h3>Folders</h3>
+            <StorageTreeView currentPath={currentPath} onFolderSelect={setCurrentPath} refreshTrigger={refreshTrigger} onStatsUpdate={updateStorageStats} />
           </div>
           
         </aside>
@@ -216,22 +129,14 @@ const Dashboard = ({ user, userRole }) => {
           <div className="main-grid">
             <section className="main-area">
               <div className="tree-view-header">
-                <h2>File Manager</h2>
+                <h2>Files</h2>
                 <div className="path-info">
-                  <span>Path: <strong>{currentPath === '/' ? '' : currentPath}</strong></span>
+                  <span>Path: <strong>{(currentPath || '/').replace(/^\/files\/?/, '/PNLM/')}</strong></span>
                   <span>Role: <strong>{userRole}</strong></span>
-                </div>
-                <div className="view-controls">
-                  <button className={`view-btn ${viewMode === 'list' ? 'active' : ''}`} onClick={() => setViewMode('list')}>📋 List</button>
-                  <button className={`view-btn ${viewMode === 'tree' ? 'active' : ''}`} onClick={() => setViewMode('tree')}>🌳 Tree</button>
                 </div>
               </div>
               <div className="main-tree-content">
-                {viewMode === 'list' ? (
-                  <FolderTree currentPath={currentPath} onPathChange={setCurrentPath} />
-                ) : (
-                  <StorageTreeView currentPath={currentPath} onFolderSelect={setCurrentPath} refreshTrigger={refreshTrigger} onStatsUpdate={updateStorageStats} />
-                )}
+                <FolderTree currentPath={currentPath} onPathChange={setCurrentPath} refreshTrigger={refreshTrigger} userRole={userRole} onFileSelect={handleFileSelect} />
               </div>
             </section>
 
@@ -246,27 +151,10 @@ const Dashboard = ({ user, userRole }) => {
                 />
               ) : (
                 <>
-                  {userRole !== 'viewer' && (
-                    <div className="panel">
-                      <h3>Upload Files</h3>
-                      <FileUploader currentPath={currentPath} onUploadComplete={refreshFiles} userRole={userRole} />
-                    </div>
-                  )}
-                  {userRole === 'user' && (
-                    <div className="panel">
-                      <h3>Requests</h3>
-                      <RequestPanel userId={user.uid} refreshTrigger={refreshTrigger} />
-                    </div>
-                  )}
                   {userRole === 'admin' && (
                     <div className="panel">
                       <h3>Storage Tools</h3>
                       <StorageManager onStructureChange={refreshFiles} />
-                    </div>
-                  )}
-                  {userRole !== 'admin' && (
-                    <div className="panel">
-                      <AdminSetup user={user} />
                     </div>
                   )}
                 </>
@@ -275,6 +163,21 @@ const Dashboard = ({ user, userRole }) => {
           </div>
         </div>
       </div>
+
+      {/* Uploader Modal */}
+      {showUploader && userRole !== 'viewer' && (
+        <div className="uploader-modal" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10000 }}>
+          <div style={{ background: '#fff', borderRadius: 8, width: 'min(720px, 92vw)', maxHeight: '88vh', overflow: 'auto', boxShadow: '0 12px 32px rgba(0,0,0,0.2)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', borderBottom: '1px solid #eee' }}>
+              <h3 style={{ margin: 0 }}>Upload Files</h3>
+              <button onClick={() => setShowUploader(false)} className="close-btn">✕</button>
+            </div>
+            <div style={{ padding: 16 }}>
+              <FileUploader currentPath={currentPath} onUploadComplete={() => { setShowUploader(false); refreshFiles(); }} userRole={userRole} />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
