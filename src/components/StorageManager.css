@@ -64,12 +64,12 @@
 
 .form-group input:focus {
   outline: none;
-  border-color: #007bff;
-  box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.25);
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
 }
 
 .folder-form button {
-  background: #007bff;
+  background: var(--primary-color);
   color: white;
   border: none;
   padding: 0.5rem 1rem;
@@ -80,7 +80,7 @@
 }
 
 .folder-form button:hover:not(:disabled) {
-  background: #0056b3;
+  background: var(--primary-dark);
 }
 
 .folder-form button:disabled {
@@ -93,7 +93,7 @@
 }
 
 .sample-btn {
-  background: #28a745;
+  background: #16a34a;
   color: white;
   border: none;
   padding: 0.75rem 1rem;
@@ -106,7 +106,7 @@
 }
 
 .sample-btn:hover:not(:disabled) {
-  background: #218838;
+  background: #15803d;
 }
 
 .sample-btn:disabled {

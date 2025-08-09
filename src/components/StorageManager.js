@@ -58,7 +58,7 @@ const StorageManager = ({ onStructureChange }) => {
 
   return (
     <div className="storage-manager">
-      <h4>Storage Structure Manager</h4>
+  <h4>Folders Manager</h4>
       
       <form onSubmit={handleSubmit} className="folder-form">
         <div className="form-group">

@@ -21,7 +21,7 @@ const StorageTreeView = ({ onFolderSelect, currentPath, refreshTrigger }) => {
         setExpandedNodes(new Set([ROOT_PATH]));
       }
     } catch (error) {
-      console.error('Error loading storage structure:', error);
+  console.error('Error loading folders:', error);
     } finally {
       setLoading(false);
     }
@@ -252,7 +252,7 @@ const StorageTreeView = ({ onFolderSelect, currentPath, refreshTrigger }) => {
   if (loading) {
     return (
       <div className="storage-tree-view loading">
-        <div className="loading-spinner">Loading storage structure...</div>
+  <div className="loading-spinner">Loading folders...</div>
       </div>
     );
   }
@@ -260,7 +260,7 @@ const StorageTreeView = ({ onFolderSelect, currentPath, refreshTrigger }) => {
   return (
     <div className={`storage-tree-view ${isFullscreen ? 'fullscreen' : ''}`}>
       <div className="tree-header">
-        <h3>Storage Structure</h3>
+  <h3>Folders</h3>
         <div className="tree-controls">
           <button 
             className="refresh-btn"

@@ -27,11 +27,11 @@
 /* Modern Admin Panel Design */
 .admin-panel {
   min-height: 100vh;
-  background: linear-gradient(135deg, var(--gray-50) 0%, var(--bg-primary) 100%);
+  background: var(--bg-primary);
 }
 
 .admin-header {
-  background: linear-gradient(135deg, var(--gray-800), var(--gray-900));
+  background: #111827;
   color: white;
   padding: var(--space-4) var(--space-8);
   display: flex;
@@ -114,14 +114,14 @@
 
 .tab-btn:hover {
   color: var(--text-primary);
-  background: linear-gradient(135deg, var(--gray-100), rgba(255, 255, 255, 0.8));
+  background: var(--gray-100);
   transform: translateY(-1px);
 }
 
 .tab-btn.active {
   color: var(--primary-color);
   border-bottom-color: var(--primary-color);
-  background: linear-gradient(135deg, var(--primary-light), rgba(255, 255, 255, 0.9));
+  background: var(--primary-light);
   box-shadow: var(--shadow-md);
 }
 
@@ -387,7 +387,7 @@
 }
 
 .reset-password-btn {
-  background: linear-gradient(135deg, #17a2b8, #138496);
+  background: #17a2b8;
   border: none;
   color: white;
   padding: 0.4rem 0.6rem;
@@ -403,7 +403,7 @@
 }
 
 .reset-password-btn:hover {
-  background: linear-gradient(135deg, #138496, #117a8b);
+  background: #117a8b;
   transform: translateY(-1px);
   box-shadow: 0 2px 6px rgba(23, 162, 184, 0.3);
 }
@@ -614,7 +614,7 @@
 }
 
 .confirm-reset-btn {
-  background: linear-gradient(135deg, #17a2b8, #138496);
+  background: #17a2b8;
   color: white;
   border: none;
   padding: 0.6rem 1.25rem;
@@ -625,7 +625,7 @@
 }
 
 .confirm-reset-btn:hover:not(:disabled) {
-  background: linear-gradient(135deg, #138496, #117a8b);
+  background: #117a8b;
   transform: translateY(-1px);
 }
 
@@ -660,7 +660,7 @@
 }
 
 .add-user-btn {
-  background: linear-gradient(135deg, var(--primary), var(--primary-light));
+  background: var(--primary);
   color: white;
   border: none;
   padding: var(--space-3) var(--space-4);
@@ -675,7 +675,7 @@
 }
 
 .add-user-btn:hover:not(:disabled) {
-  background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+  background: var(--primary-dark);
   transform: translateY(-2px);
   box-shadow: var(--shadow-lg);
 }
@@ -803,7 +803,7 @@
 }
 
 .create-user-btn {
-  background: linear-gradient(135deg, var(--primary), var(--primary-light));
+  background: var(--primary);
   color: white;
   border: none;
   padding: var(--space-3) var(--space-4);
@@ -816,7 +816,7 @@
 }
 
 .create-user-btn:hover:not(:disabled) {
-  background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+  background: var(--primary-dark);
   transform: translateY(-1px);
   box-shadow: var(--shadow-lg);
 }
@@ -828,7 +828,7 @@
 }
 
 .error-message {
-  background: linear-gradient(135deg, #fef2f2, #fee2e2);
+  background: #fee2e2;
   color: #dc2626;
   padding: var(--space-3);
   border-radius: var(--radius-md);
@@ -844,11 +844,11 @@
 }
 
 .success-message {
-  background: linear-gradient(135deg, #f0fdf4, #dcfce7);
+  background: #dcfce7;
   color: #16a34a;
   padding: var(--space-3);
   border-radius: var(--radius-md);
-  border: 1px solid #bbf7d0;
+  border: 1px solid #86efac;
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -860,7 +860,7 @@
 }
 
 .add-user-info {
-  background: linear-gradient(135deg, #eff6ff, #dbeafe);
+  background: #eff6ff;
   border: 1px solid #bfdbfe;
   border-radius: var(--radius-lg);
   padding: var(--space-4);
@@ -914,17 +914,17 @@
 }
 
 .role-card.viewer {
-  background: linear-gradient(135deg, #f8fafc, #f1f5f9);
+  background: #f1f5f9;
   border-color: #cbd5e1;
 }
 
 .role-card.user {
-  background: linear-gradient(135deg, #eff6ff, #dbeafe);
+  background: #eff6ff;
   border-color: #3b82f6;
 }
 
 .role-card.admin {
-  background: linear-gradient(135deg, #fef2f2, #fee2e2);
+  background: #fee2e2;
   border-color: #ef4444;
 }
 

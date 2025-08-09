@@ -33,7 +33,7 @@ const StarterApp = () => {
 
   return (
     <div style={{ fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, Arial', padding: 24 }}>
-      <h2 style={{ marginTop: 0 }}>Firebase File Manager — Minimal</h2>
+  <h2 style={{ marginTop: 0 }}>Receipt Manager — Minimal</h2>
       <p style={{ color: '#666', marginTop: 0 }}>Clean baseline to verify connectivity and storage listing.</p>
 
 

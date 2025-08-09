@@ -13,7 +13,7 @@ const TreeViewPage = ({ user, userRole }) => {
           <Link to="/dashboard" className="back-btn">
             ← Back to Dashboard
           </Link>
-          <h1>Firebase Storage Structure</h1>
+          <h1>Folders</h1>
         </div>
         <div className="header-right">
           <span className="current-path">
