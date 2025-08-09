@@ -140,8 +140,6 @@ const Dashboard = ({ user, userRole }) => {
               <div className="tree-view-header">
                 <h2>Files</h2>
                 <div className="path-info" style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-                  <span>Path: <strong>{(currentPath || '/').replace(/^\/(files)\/?/, '/PNLM/')}</strong></span>
-                  <span>Role: <strong>{userRole}</strong></span>
                   {userRole !== 'viewer' && (
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto' }}>
                       <button className="action-btn upload-files" onClick={handleUploadFiles}>📤 Upload Files</button>
@@ -173,19 +171,6 @@ const Dashboard = ({ user, userRole }) => {
                     title="Drop files here to upload to the selected folder"
                   >
                     <span>📥 Drop here to upload to this folder</span>
-                    <span
-                      style={{
-                        padding: '2px 8px',
-                        borderRadius: 999,
-                        background: 'white',
-                        border: '1px solid var(--primary, #3b82f6)',
-                        color: 'var(--primary, #3b82f6)',
-                        fontSize: 12,
-                        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace'
-                      }}
-                    >
-                      {(currentPath || '/').replace(/^\/files\/?/, '/PNLM/')}
-                    </span>
                   </div>
                 )}
                 <FolderTree currentPath={currentPath} onPathChange={setCurrentPath} refreshTrigger={refreshTrigger} userRole={userRole} onFileSelect={handleFileSelect} filesOnly={true} />
