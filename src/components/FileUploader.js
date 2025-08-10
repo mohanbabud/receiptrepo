@@ -126,11 +126,11 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
     }
   }, [currentPath, onUploadComplete, userRole]);
 
-  const { getRootProps, getInputProps, isDragActive, isDragReject } = useDropzone({
+  const { getRootProps, getInputProps, isDragActive, isDragReject, open } = useDropzone({
     onDrop: performUploads,
     disabled: uploading || userRole === 'viewer',
-    // Accept any file; validation handled server-side if needed
-    // accept: {},
+    noClick: true,       // prevent auto-opening on container clicks
+    noKeyboard: true,    // avoid Enter/Space triggering dialog
     maxSize: 524288000, // 500MB per file
     onDropRejected: (fileRejections) => {
       const errors = fileRejections.map(rejection => 
@@ -263,7 +263,12 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
                 <div className="upload-icon">📁</div>
                 <p><strong>Drag & drop files here</strong></p>
                 <p className="or">or</p>
-                <button type="button" className="browse-btn">
+                <button
+                  type="button"
+                  className="browse-btn"
+                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); open(); }}
+                  disabled={uploading || userRole === 'viewer'}
+                >
                   📎 Browse Files
                 </button>
                 <button
