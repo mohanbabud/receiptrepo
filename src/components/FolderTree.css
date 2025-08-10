@@ -385,7 +385,7 @@
 }
 
 .folder-card-icon {
-  color: var(--primary-dark);
+  color: #3b82f6; /* macOS-like folder blue */
   font-size: 22px;
 }
 
@@ -565,7 +565,7 @@
 }
 
 .folder-icon {
-  color: var(--warning-color);
+  color: #3b82f6; /* macOS-like folder blue */
   flex-shrink: 0;
   font-size: var(--text-xl);
   filter: drop-shadow(0 1px 2px rgba(0,0,0,0.2));
@@ -573,13 +573,13 @@
 }
 
 .folder-item:hover .folder-icon {
-  color: var(--warning-hover);
+  color: #1d4ed8;
   transform: scale(1.1);
 }
 
 .file-grid-item.selected { outline: 2px solid var(--primary-color); outline-offset: 2px; border-radius: 10px; }
 .folder-item.active .folder-icon {
-  color: #fff3e0;
+  color: #e0f2fe;
   transform: scale(1.1);
 }
 

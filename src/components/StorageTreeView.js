@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { ref, listAll } from 'firebase/storage';
 import { storage } from '../firebase';
-import { FaFolder, FaFolderOpen, FaFile, FaExpand, FaCompress } from 'react-icons/fa';
+import { FaExpand, FaCompress } from 'react-icons/fa';
+import { MacFolderIcon, MacFileIcon } from './icons/MacIcons';
 import './StorageTreeView.css';
 
 const ROOT_PATH = 'files';
@@ -182,9 +183,9 @@ const StorageTreeView = ({ onFolderSelect, currentPath, refreshTrigger }) => {
             }}
           >
             {hasChildren || path === ROOT_PATH ? (
-              isExpanded ? <FaFolderOpen /> : <FaFolder />
+              isExpanded ? <MacFolderIcon open /> : <MacFolderIcon />
             ) : (
-              <FaFolder className="empty-folder" />
+              <MacFolderIcon className="empty-folder" />
             )}
           </span>
           <span className="tree-node-label">
@@ -215,7 +216,7 @@ const StorageTreeView = ({ onFolderSelect, currentPath, refreshTrigger }) => {
               <div className="tree-files" style={{ marginLeft: `${(level + 1) * 20 + 20}px` }}>
                 {node.children.files.filter(file => file.name !== '.folder-placeholder' && file.name !== '.keep').map(file => (
                   <div key={file.path} className="tree-file">
-                    <FaFile className="file-icon" />
+                    <MacFileIcon className="file-icon" />
                     <span className="file-name">{file.name}</span>
                   </div>
                 ))}
@@ -233,7 +234,7 @@ const StorageTreeView = ({ onFolderSelect, currentPath, refreshTrigger }) => {
               <div className="tree-files" style={{ marginLeft: `${(level + 1) * 20 + 20}px` }}>
                 {node.files.filter(file => file.name !== '.folder-placeholder' && file.name !== '.keep').map(file => (
                   <div key={file.path} className="tree-file">
-                    <FaFile className="file-icon" />
+                    <MacFileIcon className="file-icon" />
                     <span className="file-name">{file.name}</span>
                   </div>
                 ))}
@@ -298,10 +299,10 @@ const StorageTreeView = ({ onFolderSelect, currentPath, refreshTrigger }) => {
 
       <div className="tree-legend">
         <div className="legend-item">
-          <FaFolder /> Folder
+          <MacFolderIcon /> Folder
         </div>
         <div className="legend-item">
-          <FaFile /> File
+          <MacFileIcon /> File
         </div>
         <div className="legend-item">
           📁 Folder count

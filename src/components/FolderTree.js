@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { ref, listAll, getMetadata, getDownloadURL, uploadBytes, deleteObject } from 'firebase/storage';
 import { storage } from '../firebase';
 import StorageTreeView from './StorageTreeView';
-import { FaFolder, FaFolderOpen, FaImage, FaFilePdf, FaFileAlt, FaVideo, FaMusic, FaTrash, FaEdit, FaCopy, FaCut } from 'react-icons/fa';
+import { FaImage, FaFilePdf, FaFileAlt, FaVideo, FaMusic, FaTrash, FaEdit, FaCopy, FaCut } from 'react-icons/fa';
+import { MacFolderIcon, MacFileIcon } from './icons/MacIcons';
 import './FolderTree.css';
 
 const ROOT_PATH = '/files/';
@@ -117,11 +118,11 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   };
 
   const getFileIcon = (fileName, fileType) => {
-    if (fileType?.startsWith('image/')) return <FaImage className="file-icon image" />;
-    if (fileType?.startsWith('video/')) return <FaVideo className="file-icon video" />;
-    if (fileType?.startsWith('audio/')) return <FaMusic className="file-icon audio" />;
-    if (fileType === 'application/pdf') return <FaFilePdf className="file-icon pdf" />;
-    return <FaFileAlt className="file-icon document" />;
+  if (fileType?.startsWith('image/')) return <MacFileIcon type="image" className="file-icon image" />;
+  if (fileType?.startsWith('video/')) return <MacFileIcon type="video" className="file-icon video" />;
+  if (fileType?.startsWith('audio/')) return <MacFileIcon type="audio" className="file-icon audio" />;
+  if (fileType === 'application/pdf') return <MacFileIcon type="pdf" className="file-icon pdf" />;
+  return <MacFileIcon className="file-icon document" />;
   };
 
   const toggleFolder = (folderPath) => {
@@ -744,7 +745,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
           <div key={folderPath} className="tree-item" onContextMenu={e => handleContextMenu(e, folderPath, 'folder')}>
             <div className={`folder-item ${currentPath === folderPath ? 'active' : ''}`} style={{ paddingLeft: `${level * 12}px` }} onClick={() => toggleFolder(folderPath)} title={`Folder: ${folderName} (${filesInFolder} files)`}>
               <div className="item-content">
-                {isExpanded ? <FaFolderOpen className="folder-icon" /> : <FaFolder className="folder-icon" />}
+                {isExpanded ? <MacFolderIcon open className="folder-icon" /> : <MacFolderIcon className="folder-icon" />}
                 <span className="folder-name">{folderName}</span>
                 <span className="folder-count">({filesInFolder})</span>
               </div>
@@ -803,7 +804,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                   onContextMenu={e => handleContextMenu(e, folderPath, 'folder')}
                 >
                   <div className="folder-card-main">
-                    <FaFolder className="folder-card-icon" />
+                    <MacFolderIcon className="folder-card-icon" />
                     <div className="folder-card-text">
                       <div className="folder-card-name" title={folderName}>{folderName}</div>
                       <div className="folder-card-meta">{filesInFolder} file{filesInFolder === 1 ? '' : 's'}</div>
