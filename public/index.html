@@ -14,6 +14,29 @@
   <title>Receipt Manager</title>
   </head>
   <body>
+    <!-- Request the kill-switch service worker early to purge any old SW/caches -->
+    <script>
+      (function(){
+        if ('serviceWorker' in navigator) {
+          // Use a versioned query to bust any caching of the SW file itself
+          var swUrl = '/service-worker.js?v=' + Date.now();
+          navigator.serviceWorker.register(swUrl).catch(function(){});
+        }
+      })();
+    </script>
+    <script>
+      // Proactively remove any old service workers and their caches to avoid stale prod builds
+      (function() {
+        if ('serviceWorker' in navigator) {
+          navigator.serviceWorker.getRegistrations().then(function(regs){
+            regs.forEach(function(reg){ reg.unregister(); });
+          }).catch(function(){});
+        }
+        if (window.caches && window.caches.keys) {
+          caches.keys().then(function(keys){ keys.forEach(function(k){ caches.delete(k); }); }).catch(function(){});
+        }
+      })();
+    </script>
     <noscript>You need to enable JavaScript to run this app.</noscript>
     <div id="root"></div>
   </body>

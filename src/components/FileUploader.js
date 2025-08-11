@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
+import { ref, uploadBytesResumable, getDownloadURL, getMetadata } from 'firebase/storage';
 import { collection, addDoc } from 'firebase/firestore';
 import { storage, db } from '../firebase';
 import './FileUploader.css';
@@ -10,7 +10,10 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
   const [uploadProgress, setUploadProgress] = useState({});
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [uploadTasks, setUploadTasks] = useState({}); // key -> uploadTask
+  const [uploadStatus, setUploadStatus] = useState({}); // key -> 'running'|'paused'|'done'|'error'|'canceled'
   const folderInputRef = useRef(null);
+  const cameraInputRef = useRef(null);
   const seededOnceRef = useRef(0);
 
   // Generate unique file ID
@@ -28,13 +31,59 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
     return base.replace(/\\/g, '/').replace(/\/+$/, '');
   };
 
-  const performUploads = useCallback(async (acceptedFiles) => {
+  const downscaleImage = useCallback(async (file) => {
+    try {
+      const blob = file;
+      const img = await new Promise((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = reject;
+        image.src = URL.createObjectURL(blob);
+      });
+      const canvas = document.createElement('canvas');
+      const maxEdge = 2000; // max width/height
+      let { width, height } = img;
+      const scale = Math.min(1, maxEdge / Math.max(width, height));
+      width = Math.round(width * scale);
+      height = Math.round(height * scale);
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, width, height);
+      const quality = 0.85;
+      const outputType = 'image/jpeg';
+      const optimizedBlob = await new Promise((resolve) => canvas.toBlob(resolve, outputType, quality));
+      URL.revokeObjectURL(img.src);
+      if (!optimizedBlob) return file;
+      // Preserve original filename; change extension if needed
+      let newName = file.name;
+      if (!/\.jpe?g$/i.test(newName)) newName = newName.replace(/\.[^.]+$/i, '') + '.jpg';
+      return new File([optimizedBlob], newName, { type: outputType, lastModified: Date.now() });
+    } catch (e) {
+      console.warn('Image optimization failed, uploading original', e);
+      return file;
+    }
+  }, []);
+
+  const preprocessFiles = useCallback(async (files) => {
+    const out = [];
+    for (const f of files) {
+      if (f.type && f.type.startsWith('image/')) {
+        out.push(await downscaleImage(f));
+      } else {
+        out.push(f);
+      }
+    }
+    return out;
+  }, [downscaleImage]);
+
+  const performUploads = useCallback(async (acceptedFilesRaw) => {
     if (userRole === 'viewer') {
       setError('You do not have permission to upload files');
       return;
     }
 
-    if (acceptedFiles.length === 0) {
+    if (acceptedFilesRaw.length === 0) {
       setError('No valid files selected');
       return;
     }
@@ -42,21 +91,45 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
     setUploading(true);
     setError('');
     setSuccess('');
-    setUploadProgress({});
+  setUploadProgress({});
+  setUploadStatus({});
+    const acceptedFiles = await preprocessFiles(acceptedFilesRaw);
     
     console.log('Starting upload for files:', acceptedFiles.map(f => f.name));
     
   const base = computeBase(currentPath);
+  const ensureUniquePath = async (folderBase, fileName) => {
+      // Add suffix (1), (2), ... before extension if file exists
+      const dot = fileName.lastIndexOf('.');
+      const stem = dot > 0 ? fileName.slice(0, dot) : fileName;
+      const ext = dot > 0 ? fileName.slice(dot) : '';
+      let attempt = 0;
+      while (true) {
+        const name = attempt === 0 ? fileName : `${stem} (${attempt})${ext}`;
+        const candidate = `${folderBase}/${name}`;
+        try {
+          await getMetadata(ref(storage, candidate));
+          // exists -> try next
+          attempt += 1;
+        } catch (_) {
+          // not exists
+          return { name, objectPath: candidate };
+        }
+      }
+    };
   const uploadPromises = acceptedFiles.map(async (file) => {
       const fileId = generateFileId();
-      const fileName = `${fileId}_${file.name}`;
-      const objectPath = `${base}/${fileName}`;
+      // Retain original filename in Storage (no prefixing)
+      const fileName = file.name;
+      const { name: finalName, objectPath } = await ensureUniquePath(base, fileName);
       const storageRef = ref(storage, objectPath);
       
       console.log('Uploading file to path:', objectPath);
       
       try {
-        const uploadTask = uploadBytesResumable(storageRef, file);
+  const uploadTask = uploadBytesResumable(storageRef, file);
+        const key = file.name;
+        setUploadTasks(prev => ({ ...prev, [key]: uploadTask }));
         
         return new Promise((resolve, reject) => {
           uploadTask.on(
@@ -65,11 +138,14 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
               const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
               setUploadProgress(prev => ({
                 ...prev,
-                [file.name]: progress
+                [key]: progress
               }));
+              const state = snapshot.state; // 'running' | 'paused'
+              setUploadStatus(prev => ({ ...prev, [key]: state === 'paused' ? 'paused' : 'running' }));
             },
             (error) => {
               console.error('Upload error for', file.name, ':', error);
+              setUploadStatus(prev => ({ ...prev, [key]: error?.code === 'storage/canceled' ? 'canceled' : 'error' }));
               reject(error);
             },
             async () => {
@@ -79,7 +155,7 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
                 // Save file metadata to Firestore
                 const fileDoc = {
                   id: fileId,
-                  name: file.name,
+                  name: finalName,
                   originalName: file.name,
                   path: currentPath,
                   fullPath: objectPath,
@@ -87,15 +163,17 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
                   size: file.size,
                   type: file.type,
                   uploadedAt: new Date(),
-                  uploadedBy: userRole === 'admin' ? 'admin' : 'user'
+                  uploadedBy: userRole === 'admin' ? 'admin' : 'user',
+                  ...(file.type?.startsWith('image/') ? { ocrStatus: 'pending' } : {})
                 };
                 
                 await addDoc(collection(db, 'files'), fileDoc);
                 console.log('File metadata saved for:', file.name);
-                
+                setUploadStatus(prev => ({ ...prev, [key]: 'done' }));
                 resolve();
               } catch (error) {
                 console.error('Error saving file metadata:', error);
+                setUploadStatus(prev => ({ ...prev, [key]: 'error' }));
                 reject(error);
               }
             }
@@ -124,7 +202,7 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
     } finally {
       setUploading(false);
     }
-  }, [currentPath, onUploadComplete, userRole]);
+  }, [currentPath, onUploadComplete, userRole, preprocessFiles]);
 
   const { getRootProps, getInputProps, isDragActive, isDragReject, open } = useDropzone({
     onDrop: performUploads,
@@ -155,26 +233,55 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
     setUploadProgress({});
 
     const base = computeBase(currentPath);
+    const ensureUniquePath = async (fullPath) => {
+      // For folders, fullPath includes subdirectories and filename
+      const parts = fullPath.split('/');
+      const fileName = parts.pop();
+      const folderBase = parts.join('/');
+      const dot = fileName.lastIndexOf('.');
+      const stem = dot > 0 ? fileName.slice(0, dot) : fileName;
+      const ext = dot > 0 ? fileName.slice(dot) : '';
+      let attempt = 0;
+      while (true) {
+        const name = attempt === 0 ? fileName : `${stem} (${attempt})${ext}`;
+        const candidate = `${folderBase}/${name}`;
+        try {
+          await getMetadata(ref(storage, candidate));
+          attempt += 1; // exists
+        } catch (_) {
+          return candidate; // not exists
+        }
+      }
+    };
 
     try {
       const tasks = fileList.map((file) => {
         // Preserve relative path inside the chosen folder
         const relPathRaw = file.webkitRelativePath || file.name;
         const relPath = relPathRaw.replace(/\\/g, '/').replace(/^\/+/, '');
-        const objectPath = `${base}/${relPath}`.replace(/\/+/, '/');
-        const storageRef = ref(storage, objectPath);
-        const uploadTask = uploadBytesResumable(storageRef, file);
+        const desiredPath = `${base}/${relPath}`.replace(/\/+/, '/');
+        let finalPath = null;
+        const computePath = async () => {
+          finalPath = await ensureUniquePath(desiredPath);
+          return finalPath;
+        };
         return new Promise((resolve, reject) => {
-          uploadTask.on(
+          computePath().then((objectPath) => {
+            const uploadTask = uploadBytesResumable(ref(storage, objectPath), file);
+            setUploadTasks(prev => ({ ...prev, [relPath]: uploadTask }));
+            uploadTask.on(
             'state_changed',
             (snapshot) => {
               const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
               setUploadProgress(prev => ({ ...prev, [relPath]: progress }));
+                const state = snapshot.state;
+                setUploadStatus(prev => ({ ...prev, [relPath]: state === 'paused' ? 'paused' : 'running' }));
             },
-            (err) => reject(err),
+              (err) => { setUploadStatus(prev => ({ ...prev, [relPath]: err?.code === 'storage/canceled' ? 'canceled' : 'error' })); reject(err); },
             async () => {
               try {
-                await getDownloadURL(uploadTask.snapshot.ref);
+                const finalRef = uploadTask.snapshot.ref;
+                await getDownloadURL(finalRef);
                 // Optional: write metadata to Firestore (best-effort)
                 try {
                   const dirPart = relPath.split('/').slice(0, -1).join('/');
@@ -183,17 +290,19 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
                     name: file.name,
                     originalName: file.name,
                     path: `/${base}/${dirPart}`,
-                    fullPath: objectPath,
+                    fullPath: finalRef.fullPath,
                     size: file.size,
                     type: file.type,
                     uploadedAt: new Date(),
                     uploadedBy: userRole === 'admin' ? 'admin' : 'user'
                   });
                 } catch (_) { /* ignore metadata errors */ }
+                  setUploadStatus(prev => ({ ...prev, [relPath]: 'done' }));
                 resolve();
               } catch (e2) { reject(e2); }
             }
           );
+          }).catch(reject);
         });
       });
       await Promise.all(tasks);
@@ -219,6 +328,20 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
     performUploads(files);
   }, [seedFiles, performUploads]);
 
+  // Resumable controls
+  const pauseAll = () => {
+    Object.values(uploadTasks).forEach(t => { try { t.pause(); } catch {} });
+  };
+  const resumeAll = () => {
+    Object.values(uploadTasks).forEach(t => { try { t.resume(); } catch {} });
+  };
+  const cancelAll = () => {
+    Object.values(uploadTasks).forEach(t => { try { t.cancel(); } catch {} });
+  };
+  const pauseOne = (key) => { const t = uploadTasks[key]; if (t) try { t.pause(); } catch {} };
+  const resumeOne = (key) => { const t = uploadTasks[key]; if (t) try { t.resume(); } catch {} };
+  const cancelOne = (key) => { const t = uploadTasks[key]; if (t) try { t.cancel(); } catch {} };
+
   if (userRole === 'viewer') {
     return (
       <div className="upload-disabled">
@@ -237,6 +360,11 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
         {uploading ? (
           <div className="upload-status">
             <p>📤 Uploading files...</p>
+            <div className="upload-controls" style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+              <button onClick={pauseAll}>Pause All</button>
+              <button onClick={resumeAll}>Resume All</button>
+              <button onClick={cancelAll} style={{ color: '#b42318' }}>Cancel All</button>
+            </div>
             {Object.entries(uploadProgress).map(([fileName, progress]) => (
               <div key={fileName} className="progress-item">
                 <span className="file-name">{fileName}</span>
@@ -247,6 +375,14 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
                   ></div>
                 </div>
                 <span className="progress-text">{Math.round(progress)}%</span>
+                <span className="progress-actions" style={{ marginLeft: 8, display: 'inline-flex', gap: 6 }}>
+                  {uploadStatus[fileName] === 'paused' ? (
+                    <button onClick={() => resumeOne(fileName)}>Resume</button>
+                  ) : (
+                    <button onClick={() => pauseOne(fileName)}>Pause</button>
+                  )}
+                  <button onClick={() => cancelOne(fileName)} style={{ color: '#b42318' }}>Cancel</button>
+                </span>
               </div>
             ))}
           </div>
@@ -274,6 +410,14 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
                 <button
                   type="button"
                   className="browse-btn"
+                  onClick={() => cameraInputRef.current && cameraInputRef.current.click()}
+                  style={{ marginLeft: 8 }}
+                >
+                  📷 Capture Photo
+                </button>
+                <button
+                  type="button"
+                  className="browse-btn"
                   onClick={() => folderInputRef.current && folderInputRef.current.click()}
                   style={{ marginLeft: 8 }}
                 >
@@ -286,6 +430,19 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
                   directory="true"
                   multiple
                   onChange={onFolderPicked}
+                  style={{ display: 'none' }}
+                />
+                <input
+                  ref={cameraInputRef}
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  onChange={(e) => {
+                    const files = Array.from(e.target.files || []);
+                    if (!files.length) return;
+                    performUploads(files);
+                    e.target.value = '';
+                  }}
                   style={{ display: 'none' }}
                 />
                 <div className="file-info">

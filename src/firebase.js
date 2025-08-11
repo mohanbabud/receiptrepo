@@ -1,6 +1,6 @@
 // Firebase configuration
 import { initializeApp } from 'firebase/app';
-import { getAuth } from 'firebase/auth';
+import { getAuth, setPersistence, inMemoryPersistence } from 'firebase/auth';
 import { initializeFirestore } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 import { getFunctions } from 'firebase/functions';
@@ -36,6 +36,16 @@ if (appCheckKey) {
 
 // Initialize Firebase services
 export const auth = getAuth(app);
+// Force login on every access by keeping auth state in memory only (no persistence)
+try {
+  setPersistence(auth, inMemoryPersistence).catch((e) => {
+    // eslint-disable-next-line no-console
+    console.warn('[Firebase] setPersistence(inMemory) failed:', e && e.message);
+  });
+} catch (e) {
+  // eslint-disable-next-line no-console
+  console.warn('[Firebase] setPersistence threw:', e && e.message);
+}
 // Initialize Firestore with robust transport for constrained networks
 export const db = initializeFirestore(app, {
   experimentalAutoDetectLongPolling: true,
@@ -45,36 +55,23 @@ export const db = initializeFirestore(app, {
 // Choose the Storage bucket: env override preferred, else use config.storageBucket
 const overrideBucket = process.env.REACT_APP_FIREBASE_STORAGE_BUCKET;
 
-function normalizeBucketHost(host) {
-  if (!host) return host;
-  const trimmed = host.trim();
-  // Prefer the modern firebasestorage.app host; some environments still expose appspot.com
-  if (trimmed.endsWith('.appspot.com')) {
-    return trimmed.replace(/\.appspot\.com$/, '.firebasestorage.app');
-  }
-  return trimmed;
-}
-
 function toGsUrl(bucketLike) {
   if (!bucketLike) return undefined;
   // If already gs://, return as-is
   if (bucketLike.startsWith('gs://')) return bucketLike;
-  // If it's a host-style string, normalize
-  // Accept forms like my-bucket.appspot.com or my-project.firebasestorage.app
-  const host = normalizeBucketHost(bucketLike);
-  return `gs://${host}`;
+  // If it looks like a bucket name or host, pass as gs://<bucket-name>
+  return `gs://${bucketLike.trim()}`;
 }
 
 // Always pass an explicit bucket to getStorage to avoid ambiguity
 let selectedBucket = overrideBucket || firebaseConfig.storageBucket;
 if (!selectedBucket) {
-  // Fallback to <projectId>.firebasestorage.app if not explicitly set
-  const pid = process.env.REACT_APP_FIREBASE_PROJECT_ID;
+  // Fallback to <projectId>.appspot.com if not explicitly set
+  const pid = process.env.REACT_APP_FIREBASE_PROJECT_ID || firebaseConfig.projectId;
   if (pid) {
-    selectedBucket = `${pid}.firebasestorage.app`;
+    selectedBucket = `${pid}.appspot.com`;
   }
 }
-selectedBucket = normalizeBucketHost(selectedBucket);
 export const storage = getStorage(app, toGsUrl(selectedBucket));
 // Helpful one-time log for visibility (safe: shows bucket host only)
 try {

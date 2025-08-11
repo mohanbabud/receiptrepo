@@ -109,3 +109,35 @@ exports.getUserStats = functions.https.onCall(async (data, context) => {
     throw new functions.https.HttpsError('internal', 'Error fetching stats', error);
   }
 });
+
+// OCR on image upload using Google Cloud Vision
+const vision = require('@google-cloud/vision');
+const visionClient = new vision.ImageAnnotatorClient();
+
+exports.ocrOnUpload = functions.storage.object().onFinalize(async (object) => {
+  try {
+    const { name: fullPath, contentType } = object; // e.g., files/receipts/abc.jpg
+    if (!fullPath || !contentType || !contentType.startsWith('image/')) return;
+
+    // Run OCR
+    const [result] = await visionClient.textDetection(`gs://${object.bucket}/${fullPath}`);
+    const detections = result.textAnnotations || [];
+    const text = (detections[0] && detections[0].description) ? detections[0].description : '';
+
+    // Try to find corresponding Firestore doc by fullPath
+    const filesSnap = await db.collection('files').where('fullPath', '==', fullPath).limit(1).get();
+    if (!filesSnap.empty) {
+      const docRef = filesSnap.docs[0].ref;
+      await docRef.set({ ocrText: text, ocrStatus: text ? 'done' : 'error' }, { merge: true });
+    }
+  } catch (err) {
+    console.error('OCR error:', err);
+    try {
+      // Mark error on doc if we can find it
+      if (object && object.name) {
+        const filesSnap = await db.collection('files').where('fullPath', '==', object.name).limit(1).get();
+        if (!filesSnap.empty) await filesSnap.docs[0].ref.set({ ocrStatus: 'error' }, { merge: true });
+      }
+    } catch (_) {}
+  }
+});

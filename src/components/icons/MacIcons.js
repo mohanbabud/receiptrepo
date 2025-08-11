@@ -62,4 +62,5 @@ export function MacFileIcon({ type, className = '' }) {
   );
 }
 
-export default { MacFolderIcon, MacFileIcon };
+const MacIcons = { MacFolderIcon, MacFileIcon };
+export default MacIcons;

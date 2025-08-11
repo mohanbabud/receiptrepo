@@ -2,6 +2,7 @@
   "name": "functions",
   "description": "Cloud Functions for Firebase",
   "scripts": {
+    "build": "echo Building Cloud Functions (noop)",
     "serve": "firebase emulators:start --only functions",
     "shell": "firebase functions:shell",
     "start": "npm run shell",
@@ -9,11 +10,13 @@
     "logs": "firebase functions:log"
   },
   "engines": {
-    "node": "18"
+    "node": "20"
   },
   "main": "index.js",
   "dependencies": {
+    "@google-cloud/vision": "^4.3.2",
     "firebase-admin": "^11.8.0",
+    "firebase-file-manager": "file:..",
     "firebase-functions": "^4.3.1"
   },
   "devDependencies": {

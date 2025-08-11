@@ -1,29 +1,4 @@
-/* Modern UI Theme Variables */
-:root {
-  --primary: #2563eb;
-  --primary-light: #60a5fa;
-  --primary-dark: #1e40af;
-  --accent: #f59e42;
-  --background: #f8fafc;
-  --surface: #ffffff;
-  --text-main: #22223b;
-  --text-muted: #6b7280;
-  --border-radius: 10px;
-  --shadow: 0 2px 8px rgba(0,0,0,0.08);
-}
-/* Company Color Theme Variables */
-:root {
-  --company-yellow: #FFD600;
-  --company-red: #D32F2F;
-  --company-grey: #424242;
-  --company-grey-light: #f5f5f5;
-  --company-grey-dark: #212121;
-  --primary-color: var(--company-yellow);
-  --primary-dark: var(--company-red);
-  --primary-light: #FFF9C4;
-  --bg-primary: var(--company-grey-light);
-  --text-primary: var(--company-grey-dark);
-}
+/* Inherit theme variables from global index.css */
 .storage-tree-view {
   background: #fff;
   border: 1px solid #ddd;
@@ -36,6 +11,7 @@
   box-shadow: 0 2px 4px rgba(0,0,0,0.1);
   transition: all 0.3s ease;
 }
+
 
 .storage-tree-view.fullscreen {
   position: fixed;
@@ -71,7 +47,7 @@
   width: 20px;
   height: 20px;
   border: 2px solid #ddd;
-  border-top: 2px solid #007bff;
+  border-top: 2px solid var(--primary-color);
   border-radius: 50%;
   animation: spin 1s linear infinite;
 }
@@ -209,6 +185,7 @@
 
 .tree-node-label {
   flex: 1;
+  min-width: 0; /* allow label to shrink with ellipsis */
   font-weight: 500;
   font-size: 14px;
   color: #333;
@@ -222,27 +199,15 @@
   font-weight: 600;
 }
 
-.tree-node-stats {
-  display: flex;
-  gap: 8px;
-  font-size: 12px;
-  color: #666;
-  align-items: center;
-}
+/* counts hidden */
+.tree-node-stats { display: none; }
 
 .tree-node-header.selected .tree-node-stats {
   color: rgba(255, 255, 255, 0.9);
 }
 
-.folder-count, .file-count {
-  background: rgba(37, 99, 235, 0.1);
-  padding: 2px 6px;
-  border-radius: 10px;
-  font-weight: 500;
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
+/* counts hidden */
+.folder-count, .file-count { display: none; }
 
 .tree-node-header.selected .folder-count,
 .tree-node-header.selected .file-count {

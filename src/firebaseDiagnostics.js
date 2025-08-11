@@ -53,17 +53,37 @@ export async function testFirestoreConnection() {
     const result = await withTimeout(
       (async () => {
         try {
-          const pingRef = doc(db, '__diagnostics__', '__ping__');
+          // Use a non-reserved collection for the connectivity probe
+          const pingRef = doc(db, 'diagnostics', '__ping__');
           // Force a server round-trip to avoid stale cache false-positives
           await getDocFromServer(pingRef);
           return true;
         } catch (err) {
+          // If we reached Firestore but rules or document state prevented a read,
+          // that's still considered "reachable" for connectivity purposes.
+          const reachableCodes = new Set([
+            'permission-denied',
+            'not-found',
+            'unauthenticated',
+            'failed-precondition', // e.g., App Check enforced without token
+            'invalid-argument', // e.g., bad path still indicates SDK reachable
+          ]);
+          if (err && (reachableCodes.has(err.code) || reachableCodes.has(err?.name))) {
+            return true;
+          }
           // As a fallback, try Firestore REST API to test reachability and rules
           try {
-            const url = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/(default)/documents/__diagnostics__/__ping__?key=${encodeURIComponent(firebaseConfig.apiKey)}`;
+            const url = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/(default)/documents/diagnostics/__ping__?key=${encodeURIComponent(firebaseConfig.apiKey)}`;
             const resp = await fetch(url, { method: 'GET' });
-            if (resp.ok || resp.status === 404 || resp.status === 403) {
-              // 200: reachable; 404: doc missing but reachable; 403: rules block but reachable
+            if (
+              resp.ok ||
+              resp.status === 404 || // doc missing but reachable
+              resp.status === 403 || // rules block but reachable
+              resp.status === 401 || // unauthorized (e.g., App Check) but reachable
+              resp.status === 429 || // throttled but reachable
+              (resp.status >= 500 && resp.status <= 599) // server error but reachable
+            ) {
+              // Treat these as connected since they prove server reachability
               return true;
             }
           } catch (restErr) {

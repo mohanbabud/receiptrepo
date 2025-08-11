@@ -42,5 +42,21 @@ service cloud.firestore {
       allow update: if request.auth != null && 
         isAdmin(request.auth.uid);
     }
+
+    // Global folder metadata (labels: tags + color)
+    match /folders_meta/{docId} {
+      // Any signed-in user can read labels
+      allow read: if request.auth != null;
+      // Only admins can write labels
+      allow create, update, delete: if request.auth != null && isAdmin(request.auth.uid);
+    }
+    
+    // Per-user favorites subcollection
+    match /users/{userId}/favorites/{favId} {
+      // Owner can read/list their own favorites
+      allow read: if request.auth != null && request.auth.uid == userId;
+      // Owner can manage their own favorites
+      allow create, update, delete: if request.auth != null && request.auth.uid == userId;
+    }
   }
 }

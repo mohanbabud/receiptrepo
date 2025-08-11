@@ -1,13 +1,13 @@
 /* Modern UI Theme Variables */
 :root {
-  --primary: #2563eb;
-  --primary-light: #60a5fa;
-  --primary-dark: #1e40af;
-  --accent: #f59e42;
-  --background: #f8fafc;
-  --surface: #ffffff;
-  --text-main: #22223b;
-  --text-muted: #6b7280;
+  --primary: #14b8a6;
+  --primary-light: #e0fdfa;
+  --primary-dark: #0f766e;
+  --accent: #f97316;
+  --background: #e0e7ef;
+  --surface: #f6f7fb;
+  --text-main: #1e293b;
+  --text-muted: #94a3b8;
   --border-radius: 10px;
   --shadow: 0 2px 8px rgba(0,0,0,0.08);
   /* Added tokens used throughout */
@@ -35,25 +35,12 @@
   --space-4: 16px;
   --space-6: 24px;
   --space-8: 32px;
-  --primary-hover: #ffca28;
-  --error-color: #ef4444;
-  --error-hover: #dc2626;
-  --warning-color: #f59e0b;
-  --warning-light: #fff7ed;
-  --bg-secondary: #f6f7fb;
-}
-/* Company Color Theme Variables */
-:root {
-  --company-yellow: #FFD600;
-  --company-red: #D32F2F;
-  --company-grey: #424242;
-  --company-grey-light: #f5f5f5;
-  --company-grey-dark: #212121;
-  --primary-color: var(--company-yellow);
-  --primary-dark: var(--company-red);
-  --primary-light: #FFF9C4;
-  --bg-primary: var(--company-grey-light);
-  --text-primary: var(--company-grey-dark);
+  --primary-hover: #0d9488;
+  --error-color: #e11d48;
+  --error-hover: #be123c;
+  --warning-color: #fbbf24;
+  --warning-light: #fef9c3;
+  --bg-secondary: #e0e7ef;
 }
 /* Dashboard Layout */
 .dashboard {
@@ -65,8 +52,9 @@
 
 /* Header Styles */
 .header {
-  background: var(--bg-primary);
-  border-bottom: 1px solid var(--gray-200);
+  background: linear-gradient(135deg, var(--primary-color), var(--primary-hover));
+  color: #ffffff;
+  border-bottom: none;
   padding: var(--space-4) var(--space-8);
   box-shadow: var(--shadow-sm);
   position: sticky;
@@ -76,7 +64,7 @@
 
 .header h1 {
   margin: 0;
-  color: var(--gray-800);
+  color: #ffffff;
   font-size: var(--text-2xl);
   font-weight: 700;
 }
@@ -161,12 +149,34 @@
 /* Mobile menu toggle (hidden by default on desktop) */
 .mobile-menu-toggle {
   display: none;
-  background: var(--bg-primary);
-  border: 1px solid var(--gray-200);
+  background: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.25);
   border-radius: var(--radius-lg);
   padding: 6px 10px;
   font-size: 18px;
   cursor: pointer;
+}
+
+/* Make header action links readable on colored header */
+.header .admin-link,
+.header .tree-view-link {
+  background: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+}
+
+.header .admin-link:hover,
+.header .tree-view-link:hover {
+  background: #ffffff;
+  color: var(--primary-color);
+}
+
+/* Improve badge contrast on colored header */
+.header .role-badge {
+  background: rgba(255, 255, 255, 0.15);
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.25);
 }
 
 .mobile-menu {
@@ -247,9 +257,39 @@
 
 .main-grid {
   display: grid;
-  grid-template-columns: 1fr 360px;
+  /* Default: single column so Files fills available width */
+  grid-template-columns: 1fr;
   gap: var(--space-4);
   padding: var(--space-6);
+}
+
+/* When a preview is open, add a right column */
+.main-grid.has-preview {
+  /* Default two-column when preview is open; JS may override to 1fr 6px Xpx when resizable active */
+  grid-template-columns: 1fr clamp(360px, 32vw, 520px);
+}
+
+/* When inline resizer is active, main-grid may be 1fr 6px <previewWidth> via inline style */
+.main-grid.resizing {
+  cursor: col-resize;
+}
+
+.grid-resizer {
+  width: 6px;
+  cursor: col-resize;
+  background: transparent;
+  position: relative;
+}
+
+.grid-resizer::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  background: var(--gray-200);
+  border-radius: 2px;
 }
 
 .right-panel {
@@ -257,6 +297,9 @@
   flex-direction: column;
   gap: var(--space-4);
 }
+
+/* Hide empty preview column to avoid extra space */
+.right-panel:empty { display: none; }
 
 .panel {
   background: var(--surface);
@@ -603,17 +646,42 @@
 /* Responsive Design */
 @media (max-width: 1024px) {
   .main-content {
-    flex-direction: column;
+    grid-template-columns: 1fr; /* stack sidebar above content via off-canvas */
     gap: var(--space-4);
   }
-  
+
+  /* Off-canvas sidebar */
   .sidebar {
-    width: 100%;
-    max-height: none;
+    position: fixed;
+    top: 64px; /* approximate header height */
+    left: 0;
+    width: 85vw;
+    max-width: 360px;
+    height: calc(100vh - 64px);
+    transform: translateX(-110%);
+    transition: transform var(--transition-normal);
+    z-index: 1000;
   }
-  
-  .stats-grid {
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  .sidebar.open {
+    transform: translateX(0);
+  }
+
+  /* Dim background when sidebar open (optional; can be added later with a backdrop div) */
+  .sidebar-backdrop {
+    position: fixed;
+    inset: 0;
+  background: rgba(2, 6, 23, 0.45);
+    z-index: 900;
+  animation: fade-in 180ms ease;
+  }
+
+  .main-grid {
+    grid-template-columns: 1fr; /* right panel stacks */
+    padding: var(--space-4);
+  }
+
+  .right-panel {
+    order: 2;
   }
 }
 
@@ -632,7 +700,7 @@
   }
   
   .main-content {
-    padding: var(--space-3);
+  padding: var(--space-3);
   }
   
   .sidebar {
@@ -676,4 +744,29 @@
 /* Even tighter phones */
 @media (max-width: 480px) {
   .header h1 { font-size: 18px; }
+
+  /* Show FilePreview as a modal overlay on very small screens */
+  .right-panel:not(:empty) {
+    position: fixed;
+    inset: 0;
+    z-index: 1100;
+    background: rgba(2, 6, 23, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+  }
+  .right-panel:not(:empty) > * {
+    max-width: 95vw;
+    max-height: 85vh;
+    overflow: auto;
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-lg);
+  }
+}
+
+/* Keyframes */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }

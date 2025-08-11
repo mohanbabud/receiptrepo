@@ -1,34 +1,5 @@
-/* Component color variables aligned to global corporate theme (see src/index.css) */
-:root {
-  --primary-color: #2563eb;
-  --primary-dark: #1e40af;
-  --primary-light: #eff6ff;
-  --bg-primary: #ffffff;
-  --bg-secondary: #f8fafc;
-  --text-primary: #111827;
-  --success-color: #10b981;
-  --success-hover: #059669;
-  --error-color: #ef4444;
-  --error-hover: #dc2626;
-  --gray-50: #f9fafb;
-  --gray-200: #e5e7eb;
-  --gray-400: #9ca3af;
-  --gray-700: #374151;
-  --radius-lg: 12px;
-  --radius-md: 8px;
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
-  --space-5: 24px;
-  --shadow-lg: 0 4px 24px rgba(0,0,0,0.12);
-  --shadow-md: 0 2px 8px rgba(0,0,0,0.08);
-  --shadow-sm: 0 1px 4px rgba(0,0,0,0.06);
-  --transition-slow: 0.4s;
-  --transition-normal: 0.2s;
-  --text-sm: 15px;
-  --text-lg: 22px;
-  --text-xl: 28px;
+/* Inherit theme variables from global index.css */
+
 /* Folder Tree Container */
 .folder-tree {
   width: 100%;
@@ -43,6 +14,7 @@
   letter-spacing: 0.01em;
   transition: background 0.4s;
   color: var(--text-primary);
+}
 
 /* Enhanced Success Popup */
 .success-popup {
@@ -585,6 +557,7 @@
 
 .folder-name {
   flex: 1;
+  min-width: 0; /* allow flex child to shrink so ellipsis works */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -593,19 +566,7 @@
   transition: all var(--transition-normal);
 }
 
-.folder-count {
-  font-size: var(--text-sm);
-  color: var(--gray-600);
-  background: linear-gradient(135deg, var(--gray-100), var(--gray-200));
-  padding: var(--space-1) var(--space-2);
-  border-radius: var(--radius-full);
-  min-width: 24px;
-  text-align: center;
-  font-weight: 600;
-  border: 1px solid var(--gray-300);
-  box-shadow: var(--shadow-sm);
-  transition: all var(--transition-normal);
-}
+.folder-count { display: none; }
 
 .folder-item:hover .folder-count {
   background: linear-gradient(135deg, var(--primary-light), rgba(255, 255, 255, 0.9));
@@ -617,6 +578,7 @@
 /* Show folder action buttons on hover */
 .folder-item .folder-actions { opacity: 0; transition: opacity 0.15s ease-in-out; }
 .folder-item:hover .folder-actions, .folder-item.active .folder-actions { opacity: 1; }
+.folder-item .folder-actions { flex-shrink: 0; }
 
 .folder-item.active .folder-count {
   background: rgba(255, 255, 255, 0.25);
@@ -689,26 +651,7 @@
 .icon-btn.rename { color: var(--primary-dark); }
 
 .file-item:hover { background: linear-gradient(90deg, #eef2ff 0%, #f8fafc 100%); color: var(--primary); border-color: var(--primary-light); box-shadow: 0 4px 16px rgba(37,99,235,0.08); }
-.context-menu-item:last-child {
-  border-bottom: none;
-}
-.context-menu-item:hover {
-  background: var(--primary-light);
-  color: var(--primary-dark);
-}
-}
-
-.context-menu-title {
-  font-size: var(--text-lg);
-  font-weight: bold;
-  color: var(--primary-dark);
-  padding: var(--space-3) var(--space-4);
-  background: var(--primary-color);
-  border-bottom: 2px solid var(--primary-dark);
-  border-radius: var(--radius-md) var(--radius-md) 0 0;
-  box-shadow: var(--shadow-sm);
-}
-}
+.context-menu-item:last-child { border-bottom: none; }
 
 .file-icon {
   flex-shrink: 0;
@@ -771,16 +714,7 @@
   background: linear-gradient(135deg, rgba(255, 193, 7, 0.1), rgba(255, 255, 255, 0.8));
 }
 
-.storage-badge {
-  font-size: var(--text-xs);
-  background: linear-gradient(135deg, var(--secondary-color), var(--secondary-dark));
-  color: white;
-  padding: var(--space-1) var(--space-2);
-  border-radius: var(--radius-full);
-  font-weight: 600;
-  box-shadow: var(--shadow-sm);
-  border: 1px solid var(--secondary-dark);
-}
+.storage-badge { display: none; }
 
 .empty-state {
   padding: var(--space-8) var(--space-4);
@@ -812,6 +746,7 @@
   align-items: center;
   gap: var(--space-3);
   flex: 1;
+  min-width: 0; /* allow inner content (folder-name) to shrink/ellipsis */
 }
 
 .delete-btn {
