@@ -303,6 +303,12 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
       await Promise.all(uploadPromises);
       setUploadProgress({});
       setSuccess(`Successfully uploaded ${acceptedFiles.length} file(s)!`);
+      try {
+        const base = computeBase(currentPath);
+        const normalized = (base + '/').replace(/^\/+/, '').replace(/\\/g,'/');
+        window.dispatchEvent(new CustomEvent('storage-meta-refresh', { detail: { prefix: normalized } }));
+        window.dispatchEvent(new CustomEvent('file-action-success', { detail: { message: 'Upload complete. Refreshing files…' } }));
+      } catch (_) {}
       
       // Clear success message after 3 seconds
       setTimeout(() => setSuccess(''), 3000);
@@ -526,6 +532,7 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
                     <option value="lossless">Lossless (strip metadata only)</option>
                     <option value="off">Off</option>
                   </select>
+                  <small style={{ fontSize: 11, opacity: 0.65 }}>Note: JPEGs are also auto-optimized on upload server-side.</small>
                 </div>
                 <button
                   type="button"

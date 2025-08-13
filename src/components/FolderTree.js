@@ -5,7 +5,7 @@ import { storage, db, auth } from '../firebase';
 import { collection, doc, onSnapshot, setDoc, deleteDoc, addDoc, serverTimestamp, getDocs, query as fsQuery, where } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 import StorageTreeView from './StorageTreeView';
-import { FaTrash, FaEdit, FaCopy, FaCut, FaStar, FaRegStar } from 'react-icons/fa';
+import { FaTrash, FaEdit, FaCopy, FaCut, FaStar, FaRegStar, FaDownload, FaEye, FaArrowUp } from 'react-icons/fa';
 import { MacFolderIcon, MacFileIcon } from './icons/MacIcons';
 import './FolderTree.css';
 
@@ -38,6 +38,12 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   const [successMessage, setSuccessMessage] = useState(''); // Keeping this for context
   const [isError, setIsError] = useState(false); // Keeping this for context
   const [selection, setSelection] = useState({ type: 'background', target: null });
+  const fileInputRef = useRef(null);
+  const [uploading, setUploading] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const [compact, setCompact] = useState(false);
+  const [editingFileId, setEditingFileId] = useState(null);
+  const [editingName, setEditingName] = useState('');
   // Removed authUser state; rely on auth.currentUser directly
   const [authReady, setAuthReady] = useState(false);
   const [clipboard, setClipboard] = useState(null); // { action: 'copy'|'cut', itemType: 'file'|'folder', payload }
@@ -48,6 +54,9 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   // Labels (tags + color) and Favorites state
   const [folderLabels, setFolderLabels] = useState({}); // { [path]: { tags: string[], color: string } }
   const [favoriteFolders, setFavoriteFolders] = useState(new Set()); // Set<string>
+  // UI feedback states for folder navigation
+  const [clickingFolder, setClickingFolder] = useState(null); // path string
+  const [navigatingTo, setNavigatingTo] = useState(null); // path string
   const [labelEditor, setLabelEditor] = useState({ open: false, path: null, tagsText: '', color: '#4b5563' });
   const menuRef = useRef(null);
   const longPressRef = useRef({ timer: null, fired: false, target: null, type: null, startX: 0, startY: 0 });
@@ -57,6 +66,30 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   const loadTokenRef = useRef(0);
   // Cache for direct counts per folder to avoid repeated listAll; separate from folderCounts state
   const countsCacheRef = useRef(new Map()); // Map<string, { files: number, subfolders: number, ts: number }>
+  // Receive external events to refresh the current folder (e.g., after optimization/resync)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const handler = (e) => {
+      try {
+        const safe = normalizeFolderPath(currentPath || ROOT_PATH);
+        const detail = (e && e.detail) || {};
+        const pfx = String(detail.prefix || '').replace(/\\/g,'/');
+        // If the event's prefix overlaps current path, refresh; otherwise do a light touch anyway
+        const shouldReload = !pfx || safe.startsWith('/' + pfx) || ('/' + pfx).startsWith(safe);
+        // Invalidate caches for the current path
+        folderCacheRef.current.delete(safe);
+        countsCacheRef.current.delete(safe);
+        if (shouldReload) {
+          loadData();
+        }
+      } catch (_) {
+        // Fallback: best-effort reload
+        loadData();
+      }
+    };
+    window.addEventListener('storage-meta-refresh', handler);
+    return () => window.removeEventListener('storage-meta-refresh', handler);
+  }, [currentPath]);
 
   const openContextMenuAt = (x, y, target, type) => {
     setContextMenu({ visible: true, x, y, target, type });
@@ -128,10 +161,10 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     }
   };
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!authReady) return;
     loadData();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentPath, refreshTrigger, includeNestedFiles, authReady]);
 
   // Listen for success messages dispatched from components like FilePreview
@@ -195,6 +228,13 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     setSelectedFolders(new Set());
     setFilePage(1);
   }, [currentPath]);
+
+  // Clear navigating indicator when loading finishes
+  useEffect(() => {
+    if (!loading) {
+      setNavigatingTo(null);
+    }
+  }, [loading]);
 
   // Ensure ancestors of the current path are expanded so the view reflects the selection
   useEffect(() => {
@@ -790,10 +830,61 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     }
   };
 
+  const uploadFilesArray = async (files) => {
+    if (!files?.length) return;
+    const safeFolder = normalizeFolderPath(currentPath || ROOT_PATH);
+    setUploading(true);
+    try {
+      for (const f of files) {
+        const destPath = (safeFolder + f.name).replace(/^\/+/, '');
+        const destRef = ref(storage, destPath);
+        await uploadBytes(destRef, f);
+      }
+      await loadData();
+      setSuccessMessage(`${files.length} file(s) uploaded`);
+      setIsError(false);
+      setShowSuccessPopup(true);
+    } catch (e) {
+      setIsError(true);
+      setSuccessMessage('Upload failed: ' + (e?.message || String(e)));
+      setShowSuccessPopup(true);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const goUpOne = () => {
+    const cur = normalizeFolderPath(currentPath || ROOT_PATH);
+    if (cur === ROOT_PATH) return;
+    const parent = cur.replace(/[^/]+\/$/, '');
+    try {
+      setExpandedFolders(prev => new Set(prev).add(parent));
+    } catch (_) {}
+    if (typeof onPathChange === 'function') onPathChange(parent);
+  };
+
+  const handleUploadFiles = async (evt) => {
+  const files = Array.from(evt.target?.files || []);
+  await uploadFilesArray(files);
+  try { if (fileInputRef.current) fileInputRef.current.value = ''; } catch(_) {}
+  };
+
   // Keyboard shortcuts for selection
   const handleKeyDown = async (e) => {
+    // Don't intercept typing/shortcuts inside form fields
+    const t = e.target;
+    const tag = t?.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t?.isContentEditable) {
+      return;
+    }
     const key = e.key;
     const ctrl = e.ctrlKey || e.metaKey;
+    // Navigate up a folder
+    if (!ctrl && !e.shiftKey && !e.altKey && key === 'Backspace') {
+      e.preventDefault();
+      goUpOne();
+      return;
+    }
     // Select All files in current folder (respects filter)
     if (ctrl && key.toLowerCase() === 'a') {
       e.preventDefault();
@@ -880,6 +971,49 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
         setShowSuccessPopup(true);
       }
       return;
+    }
+  };
+
+  const previewFile = async (file) => {
+    setSelection({ type: 'file', target: file });
+    if (!onFileSelect) return;
+    try {
+      let meta = null, url = null;
+      try { meta = await getMetadata(file.ref); } catch (_) {}
+      try { url = await getDownloadURL(file.ref); } catch (_) {}
+      const enriched = {
+        ...file,
+        downloadURL: url || file.downloadURL,
+        type: meta?.contentType || file.type,
+        size: typeof meta?.size === 'number' ? meta.size : file.size,
+        uploadedAt: meta?.updated ? new Date(meta.updated) : file.uploadedAt,
+        fullPath: file?.ref?.fullPath || file.fullPath
+      };
+      onFileSelect(enriched);
+    } catch {
+      onFileSelect(file);
+    }
+  };
+
+  const handleRenameFileTo = async (fileItem, newName) => {
+    const oldFull = fileItem?.ref?.fullPath || '';
+    const name = String(newName || '').trim();
+    if (!name) return;
+    const newFull = oldFull.replace(/[^/]+$/, name);
+    if (newFull === oldFull) return;
+    try {
+      const fileBytes = await import('firebase/storage').then(mod => mod.getBytes(fileItem.ref));
+      const newRef = ref(storage, newFull);
+      await uploadBytes(newRef, fileBytes);
+      await deleteObject(fileItem.ref);
+      setEditingFileId(null); setEditingName('');
+      setSuccessMessage('File renamed successfully!');
+      setShowSuccessPopup(true);
+      await loadData();
+    } catch (error) {
+      setIsError(true);
+      setSuccessMessage('Error renaming file: ' + (error.message || error.toString()));
+      setShowSuccessPopup(true);
     }
   };
 
@@ -1317,8 +1451,13 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     filteredFiles = filteredFiles.sort((a, b) => {
       let cmp = 0;
       if (fileSort === 'name') cmp = collator.compare(a.name || '', b.name || '');
-  else if (fileSort === 'size') cmp = (a.size || 0) - (b.size || 0);
-  else if (fileSort === 'type') cmp = collator.compare(a.type || '', b.type || '');
+      else if (fileSort === 'size') cmp = (a.size || 0) - (b.size || 0);
+      else if (fileSort === 'type') cmp = collator.compare(a.type || '', b.type || '');
+      else if (fileSort === 'modified') {
+        const da = a.uploadedAt instanceof Date ? a.uploadedAt.getTime() : 0;
+        const db = b.uploadedAt instanceof Date ? b.uploadedAt.getTime() : 0;
+        cmp = da - db;
+      }
       return fileSortDir === 'asc' ? cmp : -cmp;
     });
     // Pagination
@@ -1329,8 +1468,20 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     const pageItems = filteredFiles.slice(start, start + pageSize);
     const selectedCount = selectedFiles.size + selectedFolders.size;
     return (
-  <div key={path + '-file-grid'} className="file-grid-view" role="grid" aria-label={`Files in ${path}`}>
-        {/* Selection controls */}
+      <div
+        key={path + '-file-grid'}
+        className={`file-grid-view ${isDragging ? 'drag-over' : ''}`}
+        role="grid"
+        aria-label={`Files in ${path}`}
+        onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; if (!isDragging) setIsDragging(true); }}
+        onDragLeave={() => { setIsDragging(false); }}
+        onDrop={async (e) => {
+          e.preventDefault();
+          setIsDragging(false);
+          const files = Array.from(e.dataTransfer?.files || []);
+          await uploadFilesArray(files);
+        }}
+      >
         {filteredFiles.length > 0 && (
           <div className="selection-controls" style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '6px 8px', marginBottom: 6 }}>
             <button
@@ -1342,15 +1493,11 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
             </button>
             <button
               type="button"
-              title="Select files on this page"
-              onClick={() => setSelectedFiles(new Set(pageItems.map(f => f.id)))}
+              title="Clear selection"
+              onClick={clearSelection}
             >
-              Select page
+              Clear
             </button>
-            {selectedFiles.size > 0 && (
-              <button type="button" onClick={clearSelection} title="Clear selection">Clear</button>
-            )}
-            <span style={{ marginLeft: 'auto', fontSize: 12, color: '#666' }}>{selectedFiles.size} selected</span>
           </div>
         )}
         {selectedCount > 0 && (
@@ -1370,28 +1517,8 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
             <div
               key={file.id}
               className={`file-grid-item ${selection.type === 'file' && selection.target?.id === file.id ? 'selected' : ''}`}
-              onMouseEnter={() => { if (typeof file.size !== 'number') ensureFileMeta(file); }}
-              onClick={async () => {
-                setSelection({ type: 'file', target: file });
-                if (!onFileSelect) return;
-                // Enrich file lazily for preview (url, type, size, fullPath)
-                try {
-                  let meta = null, url = null;
-                  try { meta = await getMetadata(file.ref); } catch (_) {}
-                  try { url = await getDownloadURL(file.ref); } catch (_) {}
-                  const enriched = {
-                    ...file,
-                    downloadURL: url || file.downloadURL,
-                    type: meta?.contentType || file.type,
-                    size: typeof meta?.size === 'number' ? meta.size : file.size,
-                    uploadedAt: meta?.updated ? new Date(meta.updated) : file.uploadedAt,
-                    fullPath: file?.ref?.fullPath || file.fullPath
-                  };
-                  onFileSelect(enriched);
-                } catch {
-                  onFileSelect(file);
-                }
-              }}
+              onClick={() => setSelection({ type: 'file', target: file })}
+              onDoubleClick={() => previewFile(file)}
               onContextMenu={e => handleContextMenu(e, file, 'file')}
               title={file.name}
               role="row"
@@ -1406,28 +1533,57 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
               />
               <div className="item-content" role="gridcell">
                 {getFileIcon(file.name, file.type)}
-                <span className="file-name" title={file.name}>{file.name}</span>
+                {editingFileId === file.id ? (
+                  <input
+                    type="text"
+                    value={editingName}
+                    onChange={(e) => setEditingName(e.target.value)}
+                    onClick={(e) => e.stopPropagation()}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') { e.preventDefault(); handleRenameFileTo(file, editingName); }
+                      if (e.key === 'Escape') { e.preventDefault(); setEditingFileId(null); setEditingName(''); }
+                    }}
+                    onBlur={() => { if (editingName && editingName !== file.name) handleRenameFileTo(file, editingName); else { setEditingFileId(null); setEditingName(''); } }}
+                    autoFocus
+                    style={{ fontSize: 14, padding: '2px 6px', border: '1px solid #cbd5e1', borderRadius: 6 }}
+                    title="Rename file"
+                  />
+                ) : (
+                  <span className="file-name" title={file.name} onDoubleClick={() => { setEditingFileId(file.id); setEditingName(file.name); }}>{file.name}</span>
+                )}
                 <span className="file-size">{formatFileSize(file.size)}</span>
-                {/* Storage badge hidden per request */}
+                {file.uploadedAt && (
+                  <span className="file-modified" title={file.uploadedAt.toLocaleString?.() || ''} style={{ marginLeft: 8, color: '#64748b', fontSize: 12 }}>
+                    {new Date(file.uploadedAt).toLocaleDateString?.()}
+                  </span>
+                )}
               </div>
-              {userRole !== 'viewer' && (
-                <div className="file-actions" style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto', paddingRight: 8 }} onClick={e => e.stopPropagation()}>
-                  <button className="icon-btn rename" title="Rename" onClick={async () => { await handleRenameFile(file); }}>
-                    <FaEdit />
-                  </button>
-                  <button className="icon-btn copy" title="Copy" onClick={() => { setMoveCopyModal({ open: true, mode: 'copy', itemType: 'file', target: file, dest: normalizeFolderPath(currentPath || ROOT_PATH) }); }}>
-                    <FaCopy />
-                  </button>
-                  <button className="icon-btn move" title="Move" onClick={() => { setMoveCopyModal({ open: true, mode: 'move', itemType: 'file', target: file, dest: normalizeFolderPath(currentPath || ROOT_PATH) }); }}>
-                    <FaCut />
-                  </button>
-                  {userRole === 'admin' && (
-                    <button className="icon-btn delete" title="Delete" onClick={async () => { await confirmAndDeleteFile(file); }}>
-                      <FaTrash />
+              <div className="file-actions" style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto', paddingRight: 8 }} onClick={e => e.stopPropagation()}>
+                <button className="icon-btn preview" title="Preview" onClick={() => previewFile(file)}>
+                  <FaEye />
+                </button>
+                <button className="icon-btn download" title="Download" onClick={() => downloadSingleFile(file)}>
+                  <FaDownload />
+                </button>
+                {userRole !== 'viewer' && (
+                  <>
+                    <button className="icon-btn rename" title="Rename" onClick={() => { setEditingFileId(file.id); setEditingName(file.name); }}>
+                      <FaEdit />
                     </button>
-                  )}
-                </div>
-              )}
+                    <button className="icon-btn copy" title="Copy" onClick={() => { setMoveCopyModal({ open: true, mode: 'copy', itemType: 'file', target: file, dest: normalizeFolderPath(currentPath || ROOT_PATH) }); }}>
+                      <FaCopy />
+                    </button>
+                    <button className="icon-btn move" title="Move" onClick={() => { setMoveCopyModal({ open: true, mode: 'move', itemType: 'file', target: file, dest: normalizeFolderPath(currentPath || ROOT_PATH) }); }}>
+                      <FaCut />
+                    </button>
+                    {userRole === 'admin' && (
+                      <button className="icon-btn delete" title="Delete" onClick={async () => { await confirmAndDeleteFile(file); }}>
+                        <FaTrash />
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
             </div>
           ))
         )}
@@ -1472,7 +1628,8 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
         return nameA.localeCompare(nameB);
       });
 
-    if (subfolders.length === 0) return <div className="empty-state">No subfolders.</div>;
+  // If there are no direct subfolders, don't render an empty-state box — just render nothing.
+  if (subfolders.length === 0) return null;
 
   if (folderView === 'cards') {
       return (
@@ -1485,9 +1642,16 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
             return (
               <div
                 key={folderPath + '-card-only'}
-                className={`folder-card ${currentPath === folderPath ? 'active' : ''}`}
+                className={`folder-card ${currentPath === folderPath ? 'active' : ''} ${clickingFolder === folderPath ? 'clicking' : ''} ${navigatingTo === folderPath ? 'is-navigating' : ''}`}
                 title={`Folder: ${folderName} (${subfoldersInFolder} subfolders, ${filesInFolder} files)`}
-        onClick={(e) => { if (longPressRef.current.fired) { e.preventDefault(); return; } setExpandedFolders(prev => new Set(prev).add(folderPath)); onPathChange(folderPath); }}
+        onClick={(e) => {
+          if (longPressRef.current.fired) { e.preventDefault(); return; }
+          setClickingFolder(folderPath);
+          setNavigatingTo(folderPath);
+          setTimeout(() => { setClickingFolder(prev => (prev === folderPath ? null : prev)); }, 350);
+          setExpandedFolders(prev => new Set(prev).add(folderPath));
+          onPathChange(folderPath);
+        }}
                 onContextMenu={e => handleContextMenu(e, folderPath, 'folder')}
         onMouseEnter={() => { fetchDirectCounts(folderPath); }}
                 onTouchStart={(e) => startLongPress(e, folderPath, 'folder')}
@@ -1496,7 +1660,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                 onTouchCancel={endLongPress}
                 role="button"
                 tabIndex={0}
-                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpandedFolders(prev => new Set(prev).add(folderPath)); onPathChange(folderPath); } }}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setClickingFolder(folderPath); setNavigatingTo(folderPath); setTimeout(() => { setClickingFolder(prev => (prev === folderPath ? null : prev)); }, 350); setExpandedFolders(prev => new Set(prev).add(folderPath)); onPathChange(folderPath); } }}
                 aria-label={`Open folder ${folderName}`}
               >
                 <div className="folder-card-main">
@@ -1508,6 +1672,9 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                       <button className="icon-btn favorite" style={{ marginLeft: 8 }} aria-label={favoriteFolders.has(folderPath) ? 'Unfavorite folder' : 'Favorite folder'} aria-pressed={favoriteFolders.has(folderPath)} title={favoriteFolders.has(folderPath) ? 'Unfavorite' : 'Favorite'} onClick={(e) => { e.stopPropagation(); toggleFavorite(folderPath); }}>
                         {favoriteFolders.has(folderPath) ? <FaStar color="#f59e0b" /> : <FaRegStar />}
                       </button>
+                      {navigatingTo === folderPath && (
+                        <span className="spinner spinner-sm" aria-label="Loading" style={{ marginLeft: 8 }} />
+                      )}
                     </div>
                     <div className="folder-card-meta">{subfoldersInFolder} subfolders • {filesInFolder} files</div>
                   </div>
@@ -1559,15 +1726,18 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
           return (
             <div
               key={folderPath + '-row-only'}
-              className={`file-grid-item ${currentPath === folderPath ? 'selected' : ''}`}
+              className={`file-grid-item ${currentPath === folderPath ? 'selected' : ''} ${clickingFolder === folderPath ? 'clicking' : ''} ${navigatingTo === folderPath ? 'is-navigating' : ''}`}
               title={`Open folder ${folderName}`}
-              onClick={(e) => { if (longPressRef.current.fired) { e.preventDefault(); return; } setExpandedFolders(prev => new Set(prev).add(folderPath)); onPathChange(folderPath); }}
+              onClick={(e) => { if (longPressRef.current.fired) { e.preventDefault(); return; } setClickingFolder(folderPath); setNavigatingTo(folderPath); setTimeout(() => { setClickingFolder(prev => (prev === folderPath ? null : prev)); }, 350); setExpandedFolders(prev => new Set(prev).add(folderPath)); onPathChange(folderPath); }}
               onContextMenu={(e) => handleContextMenu(e, folderPath, 'folder')}
               onMouseEnter={() => { fetchDirectCounts(folderPath); }}
             >
               <div className="item-content">
                 <MacFolderIcon className="folder-icon" />
                 <span className="folder-name">{folderName}</span>
+                {navigatingTo === folderPath && (
+                  <span className="spinner spinner-sm" aria-label="Loading" style={{ marginLeft: 8 }} />
+                )}
                 <span className="folder-card-meta" style={{ marginLeft: 8 }}>{subfoldersInFolder} subfolders • {filesInFolder} files</span>
               </div>
             </div>
@@ -1580,9 +1750,20 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   if (loading) return <div className="loading">Loading files...</div>;
 
   return (
-  <div className="folder-tree" tabIndex={0} onKeyDown={handleKeyDown}>
+  <div className={`folder-tree ${compact ? 'compact' : ''}`} tabIndex={0} onKeyDown={handleKeyDown}>
   <div className="tree-header" onContextMenu={e => handleContextMenu(e, currentPath, 'background')}>
         <div className="breadcrumb-path">
+          <button
+            type="button"
+            className="breadcrumb-link up-button"
+            onClick={goUpOne}
+            title="Up one level"
+            aria-label="Up one level"
+            disabled={normalizeFolderPath(currentPath || ROOT_PATH) === ROOT_PATH}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+          >
+            <FaArrowUp />
+          </button>
           <span className="path-label">📁</span>
           <div className="breadcrumb-nav">
             {(() => {
@@ -1616,49 +1797,29 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
         <div className="tree-controls">
           {!filesOnly && (
             <>
-              {/* Quick jump to folder */}
-              <input
-                type="text"
-                list="folders-list"
-                placeholder="Quick jump (e.g., /files/Projects/)"
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    const val = e.currentTarget.value;
-                    if (!val) return;
-                    const dest = normalizeFolderPath(val);
-                    setExpandedFolders(prev => new Set([...prev, dest]));
-                    onPathChange(dest);
-                    e.currentTarget.value = '';
-                  }
-                }}
-                style={{ marginRight: '8px', width: 280 }}
-              />
-              <datalist id="folders-list">
-                {[...storageFolders].sort().map(fp => (
-                  <option key={fp} value={fp} />
-                ))}
-              </datalist>
-              <button
-                title="Expand all"
-                onClick={() => setExpandedFolders(new Set([ROOT_PATH, ...storageFolders]))}
-                style={{ marginRight: 8 }}
-              >
-                Expand All
-              </button>
-              <button
-                title="Collapse all"
-                onClick={() => setExpandedFolders(new Set([ROOT_PATH]))}
-                style={{ marginRight: 8 }}
-              >
-                Collapse All
-              </button>
               <button
                 title={`Folder view: ${folderView === 'cards' ? 'Cards' : 'List'}`}
                 onClick={() => setFolderView(v => (v === 'cards' ? 'list' : 'cards'))}
                 style={{ marginRight: 8 }}
               >
-                Folders: {folderView === 'cards' ? 'Cards' : 'List'}
+                Folder View: {folderView === 'cards' ? 'Cards' : 'List'}
               </button>
+              {userRole !== 'viewer' && (
+                <button
+                  type="button"
+                  title="Create new folder"
+                  onClick={() => {
+                    try {
+                      const base = normalizeFolderPath(currentPath || ROOT_PATH);
+                      setNewFolderBasePath(base);
+                    } catch {}
+                    setShowNewFolderInput(true);
+                  }}
+                  style={{ marginRight: 8 }}
+                >
+                  📁 New Folder
+                </button>
+              )}
             </>
           )}
           {showNewFolderInput && (
@@ -1703,18 +1864,13 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
               style={{ marginRight: '8px' }}
             />
           )}
-          <button
-            className="action-btn"
-            style={{ background: '#f3f4f6', color: '#334155', border: '1px solid #ddd', borderRadius: 6, padding: '6px 12px', marginRight: 8 }}
-            onClick={createKeepFilesInEmptyFolders}
-            title="Add .keep files to all empty subfolders"
-          >
-            Add .keep to empty subfolders
-          </button>
+          {/* placeholder gap removed after UI cleanup */}
+          {/* Redundant inline Upload removed; use global Upload panel or drag-and-drop */}
           <select className="file-sort-select" value={fileSort} onChange={e => setFileSort(e.target.value)}>
             <option value="name">Sort by Name</option>
             <option value="size">Sort by Size</option>
             <option value="type">Sort by Type</option>
+            <option value="modified">Sort by Modified</option>
           </select>
           <button
             type="button"
@@ -1729,9 +1885,24 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
             <input type="checkbox" checked={includeNestedFiles} onChange={(e) => setIncludeNestedFiles(e.target.checked)} />
             Include nested files
           </label>
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: 12, fontSize: 13 }} title="Compact list density">
+            <input type="checkbox" checked={compact} onChange={(e) => setCompact(e.target.checked)} />
+            Compact
+          </label>
         </div>
       </div>
       {/* Lightweight stats for the current folder to aid clarity */}
+      {/* Manual refresh control */}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '0 4px' }}>
+        <button title="Refresh current folder" onClick={() => { try {
+          const safe = normalizeFolderPath(currentPath || ROOT_PATH);
+          folderCacheRef.current.delete(safe);
+          countsCacheRef.current.delete(safe);
+        } catch (_) {} finally { loadData(); } }}>Refresh</button>
+      </div>
+      
+      
+      
       {(() => {
         const safe = normalizeFolderPath(currentPath || ROOT_PATH);
         const fc = folderCounts[safe];

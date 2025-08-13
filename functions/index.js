@@ -188,7 +188,11 @@ exports.optimizeExistingImages = functions
       throw new functions.https.HttpsError('permission-denied', 'Only admin can run backfill');
     }
 
-    const prefix = (data && typeof data.prefix === 'string' ? data.prefix : 'files/').replace(/^\/+/, '');
+    const prefix = (data && typeof data.prefix === 'string' ? data.prefix : 'files/')
+      .toString()
+      .trim()
+      .replace(/\\/g, '/')
+      .replace(/^\/+/, '');
     const limit = Math.max(0, Math.floor(data && data.limit ? data.limit : 50));
     const dryRun = !!(data && data.dryRun);
     const overwrite = !!(data && data.overwrite);
@@ -260,6 +264,24 @@ exports.optimizeExistingImages = functions
             resumable: false,
             validation: false
           });
+          // Also update Firestore metadata doc(s) if present so UI shows new size
+          try {
+            const q = await db.collection('files').where('fullPath', '==', file.name).get();
+            if (!q.empty) {
+              const payload = {
+                size: afterSize,
+                type: 'image/jpeg',
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                optimized: mode,
+                optimizedAt: admin.firestore.FieldValue.serverTimestamp(),
+              };
+              const batch = db.batch();
+              q.forEach((docSnap) => batch.set(docSnap.ref, payload, { merge: true }));
+              await batch.commit();
+            }
+          } catch (e) {
+            console.warn('Failed to update Firestore size for', file.name, e.message || e);
+          }
         }
         processed++;
       }
@@ -282,3 +304,54 @@ exports.optimizeExistingImages = functions
       details
     };
   });
+
+// Optimize JPEGs on upload automatically. Skips if already optimized or not image/jpeg.
+exports.optimizeOnUpload = functions.storage.object().onFinalize(async (object) => {
+  try {
+    const { name: fullPath, contentType, bucket } = object || {};
+    if (!fullPath || !contentType) return;
+    // Only JPEGs (by ext or content type)
+    const lower = fullPath.toLowerCase();
+    const looksJpeg = lower.endsWith('.jpg') || lower.endsWith('.jpeg');
+    const isJpegCT = typeof contentType === 'string' && contentType.startsWith('image/jpeg');
+    if (!(looksJpeg || isJpegCT)) return;
+
+    const md = (object && object.metadata) || {};
+    if (md.optimized) return; // avoid reprocessing loop
+
+    const gcs = storage.bucket(bucket).file(fullPath);
+    // Download
+    const [buf] = await gcs.download();
+    const image = sharp(buf, { failOn: 'none' }).rotate();
+    // Use balanced as default to keep sizes under control
+    const optimizedBuf = await image
+      .resize({ width: 2000, height: 2000, fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 85, mozjpeg: true, chromaSubsampling: '4:4:4' })
+      .toBuffer();
+
+    // Save back with optimized metadata flag
+    await gcs.save(optimizedBuf, {
+      contentType: 'image/jpeg',
+      metadata: { metadata: { optimized: 'balanced', optimizedAt: new Date().toISOString() } },
+      resumable: false,
+      validation: false,
+    });
+
+    // Update Firestore size/type for corresponding file doc(s)
+    const q = await db.collection('files').where('fullPath', '==', fullPath).get();
+    if (!q.empty) {
+      const payload = {
+        size: optimizedBuf.length,
+        type: 'image/jpeg',
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        optimized: 'balanced',
+        optimizedAt: admin.firestore.FieldValue.serverTimestamp(),
+      };
+      const batch = db.batch();
+      q.forEach((docSnap) => batch.set(docSnap.ref, payload, { merge: true }));
+      await batch.commit();
+    }
+  } catch (err) {
+    console.error('optimizeOnUpload error:', err);
+  }
+});

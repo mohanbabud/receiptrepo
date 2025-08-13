@@ -1,8 +1,7 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { ref, uploadString } from 'firebase/storage';
 import { signOut } from 'firebase/auth';
 import { Link } from 'react-router-dom';
-import { auth, storage } from '../firebase';
+import { auth } from '../firebase';
 import FolderTree from './FolderTree';
 import FileUploader from './FileUploader';
 import FilePreview from './FilePreview';
@@ -67,26 +66,7 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
 
   // Removed top-level header create-folder; Files section has its own subfolder action
 
-  const handleUploadFiles = () => {
-    setCollapseUploader(false);
-  };
-
-  const handleCreateSubfolder = useCallback(async () => {
-    if (userRole === 'viewer') return;
-    const name = prompt('Enter subfolder name:');
-    if (!name || !name.trim()) return;
-    try {
-      let base = currentPath || '/files/';
-      if (!base.endsWith('/')) base += '/';
-      const fullPath = `${base}${name.trim().replace(/^\/+|\/+$/g, '')}/.keep`.replace(/^\/+/, '');
-  const keepRef = ref(storage, fullPath.replace(/^\/+/, ''));
-  // Use a tiny non-empty payload for consistency in listings
-  await uploadString(keepRef, 'keep', 'raw', { contentType: 'text/plain' });
-      refreshFiles();
-    } catch (e) {
-      alert('Failed to create subfolder: ' + (e?.message || e));
-    }
-  }, [currentPath, userRole]);
+  // Removed: header-level Upload/Create actions; use the Upload panel and FolderTree controls instead
 
   const onBannerDrop = useCallback((e) => {
     e.preventDefault();
@@ -320,13 +300,13 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
                       onChange={(e) => setShowFolders(e.target.checked)}
                       aria-label="Show folders in Files view"
                     />
-                    <span>Show folders</span>
+                    <span>Show Folders</span>
                   </label>
                   {userRole !== 'viewer' && (
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto' }}>
-                      <button className="action-btn upload-files" onClick={handleUploadFiles}>📤 Upload Files</button>
-                      <button className="action-btn create-folder" onClick={handleCreateSubfolder}>📁 Create subfolder</button>
-                      <button className="action-btn refresh-all" onClick={() => setRefreshTrigger(prev => prev + 1)}>🔄 Refresh</button>
+                      <button className="action-btn upload-files" onClick={() => setCollapseUploader(v => !v)}>
+                        {collapseUploader ? '📤 Upload Files' : '▲ Close Upload'}
+                      </button>
                     </div>
                   )}
                 </div>
@@ -337,29 +317,7 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
                 onDragEnter={userRole !== 'viewer' ? onBannerDrag : undefined}
                 onDrop={userRole !== 'viewer' ? onBannerDrop : undefined}
               >
-                {/* Drop banner for filesOnly context */}
-                {userRole !== 'viewer' && (
-                  <div
-                    onDragOver={onBannerDrag}
-                    onDragEnter={onBannerDrag}
-                    onDrop={onBannerDrop}
-                    style={{
-                      marginBottom: 10,
-                      padding: '10px 12px',
-                      border: '1px dashed var(--primary, #3b82f6)',
-                      borderRadius: 8,
-                      background: '#f8fafc',
-                      color: '#334155',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      gap: 12
-                    }}
-                    title="Drop files here to upload to the selected folder"
-                  >
-                    <span>📥 Drop here to upload to this folder</span>
-                  </div>
-                )}
+                {/* Removed secondary drop banner to avoid duplicate upload entry points */}
                 <FolderTree
                   currentPath={currentPath}
                   onPathChange={setCurrentPath}
@@ -368,16 +326,9 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
                   onFileSelect={handleFileSelect}
                   filesOnly={!showFolders}
                 />
-                {userRole !== 'viewer' && (
+                {userRole !== 'viewer' && !collapseUploader && (
                   <div style={{ marginTop: 12 }} ref={uploaderPanelRef}>
-                    <button className="action-btn" onClick={() => setCollapseUploader(v => !v)}>
-                      {collapseUploader ? '▼' : '▲'} Upload panel
-                    </button>
-                    {!collapseUploader && (
-                      <div style={{ marginTop: 8 }}>
-                        <FileUploader currentPath={currentPath} onUploadComplete={() => { setDroppedFiles([]); refreshFiles(); }} userRole={userRole} seedFiles={droppedFiles} />
-                      </div>
-                    )}
+                    <FileUploader currentPath={currentPath} onUploadComplete={() => { setDroppedFiles([]); refreshFiles(); }} userRole={userRole} seedFiles={droppedFiles} />
                   </div>
                 )}
               </div>

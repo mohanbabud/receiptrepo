@@ -169,6 +169,16 @@
   margin: 0 var(--space-1);
 }
 
+/* Compact Up button aligned with breadcrumbs */
+.up-button {
+  padding: 6px 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  height: 32px;
+}
+
 .tree-controls {
   display: flex;
   align-items: center;
@@ -502,6 +512,32 @@
 .file-grid-item .item-content { min-width: 0; }
 .file-grid-item .file-name { max-width: 50vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* Drag-and-drop upload highlight */
+.file-grid-view.drag-over {
+  border: 2px dashed var(--primary-light);
+  border-radius: var(--radius-md);
+  background: linear-gradient(180deg, rgba(59,130,246,0.06), rgba(59,130,246,0.02));
+}
+
+/* Compact density mode */
+.folder-tree.compact .file-grid-item {
+  padding-right: 6px;
+}
+.folder-tree.compact .item-content {
+  gap: 8px;
+}
+.folder-tree.compact .file-name {
+  font-size: 13px;
+}
+.folder-tree.compact .file-size {
+  font-size: 11px;
+  padding: 2px 6px;
+}
+.folder-tree.compact .icon-btn {
+  width: 24px;
+  height: 24px;
+}
+
 .folder-item {
   display: flex;
   align-items: center;
@@ -632,6 +668,7 @@
   align-items: center;
   justify-content: space-between;
   padding-right: 8px;
+  cursor: pointer; /* show hand cursor on hover */
 }
 
 .file-grid-item .file-actions {
@@ -990,4 +1027,36 @@
     opacity: 1;
     transform: translateY(0) scale(1);
   }
+}
+
+/* Navigation feedback: subtle click pulse */
+.clicking {
+  animation: click-pulse 300ms ease-out;
+}
+
+@keyframes click-pulse {
+  0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(59,130,246,0.0); }
+  40% { transform: scale(0.98); box-shadow: 0 0 0 2px rgba(59,130,246,0.15); }
+  100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(59,130,246,0.0); }
+}
+
+/* Small inline spinner for navigation feedback */
+.spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(0,0,0,0.1);
+  border-top-color: rgba(59,130,246,1);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.spinner-sm {
+  width: 14px;
+  height: 14px;
+  border-width: 2px;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }

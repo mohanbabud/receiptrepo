@@ -17,8 +17,8 @@
     "@google-cloud/vision": "^4.3.2",
     "firebase-admin": "^11.8.0",
     "firebase-file-manager": "file:..",
-  "firebase-functions": "^4.3.1",
-  "sharp": "^0.33.4"
+    "firebase-functions": "^4.3.1",
+    "sharp": "^0.33.4"
   },
   "devDependencies": {
     "firebase-functions-test": "^3.1.0"
