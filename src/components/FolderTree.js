@@ -136,8 +136,9 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     setTimeout(() => { lp.fired = false; }, 0);
   };
 
-  // Utility: create .keep files in all empty subfolders under the current folder
-  const createKeepFilesInEmptyFolders = async () => {
+  // Utility: create .keep files in all empty subfolders under the current folder (deprecated; button hidden)
+  // Keeping for reference but not used to avoid ESLint warning
+  /* const createKeepFilesInEmptyFolders = async () => {
     try {
       const safe = normalizeFolderPath(currentPath || ROOT_PATH);
       const folderRef = ref(storage, safe.replace(/^\/+/, ''));
@@ -159,7 +160,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
       setSuccessMessage('Failed to add .keep files.');
       setShowSuccessPopup(true);
     }
-  };
+  }; */
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
@@ -863,11 +864,11 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     if (typeof onPathChange === 'function') onPathChange(parent);
   };
 
-  const handleUploadFiles = async (evt) => {
-  const files = Array.from(evt.target?.files || []);
-  await uploadFilesArray(files);
-  try { if (fileInputRef.current) fileInputRef.current.value = ''; } catch(_) {}
-  };
+  // const handleUploadFiles = async (evt) => {
+  //   const files = Array.from(evt.target?.files || []);
+  //   await uploadFilesArray(files);
+  //   try { if (fileInputRef.current) fileInputRef.current.value = ''; } catch(_) {}
+  // };
 
   // Keyboard shortcuts for selection
   const handleKeyDown = async (e) => {

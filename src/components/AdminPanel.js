@@ -58,7 +58,6 @@ const AdminPanel = ({ user }) => {
   const [selfTestError, setSelfTestError] = useState('');
 
   // Resync sizes
-  const [resyncPrefix, setResyncPrefix] = useState('files/');
   const [resyncLimit, setResyncLimit] = useState(50);
   const [resyncLoading, setResyncLoading] = useState(false);
   const [resyncError, setResyncError] = useState('');
@@ -172,7 +171,7 @@ const AdminPanel = ({ user }) => {
     setResyncLoading(true); setResyncError(''); setResyncSummary(null);
     setShowFailedDetails(false);
     try {
-      const rawPrefix = prefixFromCaller ?? resyncPrefix;
+      const rawPrefix = prefixFromCaller ?? 'files/';
       const prefix = String(rawPrefix || '').trim().replace(/\\/g, '/').replace(/^\/+/, '');
       const q = query(
         collection(db, 'files'),
