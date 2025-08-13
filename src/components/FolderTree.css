@@ -566,6 +566,9 @@
   transition: all var(--transition-normal);
 }
 
+/* Dark theme: ensure folder names are high contrast */
+[data-theme="dark"] .folder-name { color: var(--text-primary); }
+
 .folder-count { display: none; }
 
 .folder-item:hover .folder-count {
@@ -603,13 +606,23 @@
   min-height: 40px;
   margin: var(--space-1) var(--space-2);
   background: #fff;
-  color: var(--text-main);
+  color: var(--text-primary);
   border-radius: 10px;
   margin-bottom: 6px;
   border: 1px solid #e5e7eb;
   transition: background 0.2s, color 0.2s, box-shadow 0.2s;
   box-shadow: 0 1px 4px rgba(0,0,0,0.03);
   backdrop-filter: blur(5px);
+}
+
+/* Dark theme: improve file row readability */
+[data-theme="dark"] .file-item {
+  background: var(--bg-primary);
+  border-color: var(--gray-300);
+  box-shadow: 0 1px 6px rgba(0,0,0,0.4);
+}
+[data-theme="dark"] .file-item:hover {
+  background: #192237;
 }
 
 /* Inline file actions */
@@ -643,8 +656,10 @@
   justify-content: center;
   cursor: pointer;
   box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+  transition: transform var(--transition-fast), box-shadow var(--transition-fast), background-color var(--transition-fast);
 }
 .icon-btn:hover { background: #f3f4f6; }
+.icon-btn:active { transform: scale(0.96); box-shadow: 0 0 0 rgba(0,0,0,0.06); }
 .icon-btn.delete { color: var(--error-color); }
 .icon-btn.move { color: var(--warning-color); }
 .icon-btn.copy { color: var(--secondary-dark); }

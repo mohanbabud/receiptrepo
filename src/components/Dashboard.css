@@ -203,45 +203,19 @@
 /* Main Content Layout */
 .main-content {
   display: grid;
-  grid-template-columns: 320px 1fr;
+  grid-template-columns: 1fr; /* single column: content only */
   gap: var(--space-4);
   padding: var(--space-4);
   min-height: calc(100vh - 120px);
 }
 
 /* Sidebar Styles */
-.sidebar {
-  width: 320px;
-  background: var(--bg-primary);
-  border-radius: var(--radius-xl);
-  padding: var(--space-6);
-  box-shadow: var(--shadow-lg);
-  border: 1px solid var(--gray-200);
-  overflow-y: auto;
-  height: fit-content;
-  max-height: 100%;
-}
+/* sidebar removed */
 
-.sidebar-section {
-  margin-bottom: var(--space-8);
-  padding-bottom: var(--space-6);
-  border-bottom: 1px solid var(--gray-200);
-}
+/* Sidebar Resizer */
+/* sidebar resizer removed */
 
-.sidebar-section:last-child {
-  border-bottom: none;
-  margin-bottom: 0;
-}
-
-.sidebar-section h3 {
-  margin: 0 0 var(--space-4) 0;
-  color: var(--gray-800);
-  font-size: var(--text-lg);
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-}
+/* sidebar sections removed */
 
 /* Content Area */
 .content {
@@ -646,33 +620,8 @@
 /* Responsive Design */
 @media (max-width: 1024px) {
   .main-content {
-    grid-template-columns: 1fr; /* stack sidebar above content via off-canvas */
+    grid-template-columns: 1fr;
     gap: var(--space-4);
-  }
-
-  /* Off-canvas sidebar */
-  .sidebar {
-    position: fixed;
-    top: 64px; /* approximate header height */
-    left: 0;
-    width: 85vw;
-    max-width: 360px;
-    height: calc(100vh - 64px);
-    transform: translateX(-110%);
-    transition: transform var(--transition-normal);
-    z-index: 1000;
-  }
-  .sidebar.open {
-    transform: translateX(0);
-  }
-
-  /* Dim background when sidebar open (optional; can be added later with a backdrop div) */
-  .sidebar-backdrop {
-    position: fixed;
-    inset: 0;
-  background: rgba(2, 6, 23, 0.45);
-    z-index: 900;
-  animation: fade-in 180ms ease;
   }
 
   .main-grid {

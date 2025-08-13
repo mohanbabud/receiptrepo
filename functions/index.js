@@ -141,3 +141,144 @@ exports.ocrOnUpload = functions.storage.object().onFinalize(async (object) => {
     } catch (_) {}
   }
 });
+
+// Admin-set password (callable). Only users with role 'admin' in Firestore can call this.
+exports.adminSetUserPassword = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError('unauthenticated', 'User must be authenticated');
+  }
+  const callerUid = context.auth.uid;
+  const callerDoc = await db.collection('users').doc(callerUid).get();
+  if (!callerDoc.exists || callerDoc.data().role !== 'admin') {
+    throw new functions.https.HttpsError('permission-denied', 'Only admin can set passwords');
+  }
+  const { uid, password } = data || {};
+  if (!uid || typeof uid !== 'string') {
+    throw new functions.https.HttpsError('invalid-argument', 'uid is required');
+  }
+  if (!password || typeof password !== 'string' || password.length < 6) {
+    throw new functions.https.HttpsError('invalid-argument', 'Password must be at least 6 characters');
+  }
+  try {
+    await admin.auth().updateUser(uid, { password });
+    return { success: true };
+  } catch (err) {
+    console.error('adminSetUserPassword error:', err);
+    throw new functions.https.HttpsError('internal', err?.message || 'Failed to update password');
+  }
+});
+
+// Backfill optimization for existing JPEGs in Storage.
+// Modes:
+//   - lossless: strip metadata, preserve orientation, quality=100
+//   - balanced: resize to max 2000px (inside), quality=85
+// Options:
+//   prefix (string, default 'files/'), limit (number), dryRun (bool), mode ('lossless'|'balanced'), overwrite (bool)
+const sharp = require('sharp');
+
+exports.optimizeExistingImages = functions
+  .runWith({ timeoutSeconds: 540, memory: '1GB' })
+  .https.onCall(async (data, context) => {
+    if (!context.auth) {
+      throw new functions.https.HttpsError('unauthenticated', 'User must be authenticated');
+    }
+    const callerUid = context.auth.uid;
+    const callerDoc = await db.collection('users').doc(callerUid).get();
+    if (!callerDoc.exists || callerDoc.data().role !== 'admin') {
+      throw new functions.https.HttpsError('permission-denied', 'Only admin can run backfill');
+    }
+
+    const prefix = (data && typeof data.prefix === 'string' ? data.prefix : 'files/').replace(/^\/+/, '');
+    const limit = Math.max(0, Math.floor(data && data.limit ? data.limit : 50));
+    const dryRun = !!(data && data.dryRun);
+    const overwrite = !!(data && data.overwrite);
+    const mode = (data && (data.mode === 'lossless' || data.mode === 'balanced') ? data.mode : 'lossless');
+
+    const bucket = storage.bucket();
+    let pageToken = undefined;
+    let scanned = 0;
+    let processed = 0;
+    let skipped = 0;
+    let savedBytes = 0;
+    const details = [];
+
+    const shouldProcess = (file, metadata) => {
+      const name = file.name || '';
+      const ct = (metadata && (metadata.contentType || metadata['content-type'])) || '';
+      const lower = name.toLowerCase();
+      const looksJpeg = lower.endsWith('.jpg') || lower.endsWith('.jpeg');
+      const isJpegCT = typeof ct === 'string' && ct.startsWith('image/jpeg');
+      if (!(looksJpeg || isJpegCT)) return false;
+      // Skip if already optimized in same mode unless overwrite
+      const md = (metadata && metadata.metadata) || {};
+      if (!overwrite && md && md.optimized && md.optimized === mode) return false;
+      return true;
+    };
+
+    const optimizeBuffer = async (inputBuf) => {
+      const image = sharp(inputBuf, { failOn: 'none' }).rotate();
+      if (mode === 'balanced') {
+        return image
+          .resize({ width: 2000, height: 2000, fit: 'inside', withoutEnlargement: true })
+          .jpeg({ quality: 85, mozjpeg: true, chromaSubsampling: '4:4:4' })
+          .toBuffer();
+      }
+      // lossless-ish: strip metadata, keep orientation, max quality
+      return image.jpeg({ quality: 100, mozjpeg: true, chromaSubsampling: '4:4:4' }).toBuffer();
+    };
+
+    outer: while (true) {
+      const [files, nextQuery] = await bucket.getFiles({ prefix, autoPaginate: false, pageToken });
+      for (const file of files) {
+        if (limit && processed >= limit) break outer;
+        // Fetch metadata
+        let [meta] = await file.getMetadata().catch(() => [{}]);
+        scanned++;
+        if (!shouldProcess(file, meta)) { skipped++; continue; }
+        const beforeSize = Number(meta && meta.size) || 0;
+        // Download contents
+        const [buf] = await file.download();
+        let optimizedBuf;
+        try {
+          optimizedBuf = await optimizeBuffer(buf);
+        } catch (e) {
+          console.error('Optimize error for', file.name, e);
+          skipped++;
+          continue;
+        }
+
+        const afterSize = optimizedBuf.length;
+        const delta = beforeSize > 0 ? beforeSize - afterSize : 0;
+        savedBytes += delta > 0 ? delta : 0;
+        details.push({ path: file.name, before: beforeSize, after: afterSize, saved: delta });
+
+        if (!dryRun) {
+          // Overwrite object with optimized JPEG, set metadata flag
+          await file.save(optimizedBuf, {
+            contentType: 'image/jpeg',
+            metadata: { metadata: { optimized: mode, optimizedAt: new Date().toISOString() } },
+            resumable: false,
+            validation: false
+          });
+        }
+        processed++;
+      }
+      if (nextQuery && nextQuery.pageToken) {
+        pageToken = nextQuery.pageToken;
+      } else {
+        break;
+      }
+    }
+
+    return {
+      prefix,
+      mode,
+      dryRun,
+      limit,
+      scanned,
+      processed,
+      skipped,
+      savedBytes,
+      details
+    };
+  });

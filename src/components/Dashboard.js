@@ -6,29 +6,16 @@ import { auth, storage } from '../firebase';
 import FolderTree from './FolderTree';
 import FileUploader from './FileUploader';
 import FilePreview from './FilePreview';
-import StorageTreeView from './StorageTreeView';
 import StatusBar from './StatusBar';
 import './Dashboard.css';
 
 import ThemeToggle from './ThemeToggle';
 import AccentToggle from './AccentToggle';
 import PresetToggle from './PresetToggle';
+import ChangePasswordModal from './ChangePasswordModal';
 
 const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset, setPreset }) => {
-  // Normalize any incoming path to '/files/.../' format used by FolderTree
-  const normalizeFilesPath = useCallback((input) => {
-    let p = String(input || '').replace(/\\/g, '/');
-    if (!p) return '/files/';
-    if (!p.startsWith('/')) p = '/' + p;
-    // Ensure it starts with '/files/'
-    if (!p.startsWith('/files/')) {
-      if (p === '/files') p = '/files/';
-      else if (p.startsWith('/files')) p = p.replace('/files', '/files');
-      else p = '/files' + (p === '/' ? '/' : p);
-    }
-    if (!p.endsWith('/')) p += '/';
-    return p.replace(/\/+/g, '/');
-  }, []);
+  // No left sidebar path sync; Files view controls the path
   const [currentPath, setCurrentPath] = useState('/files/');
   const [selectedFile, setSelectedFile] = useState(null);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
@@ -36,12 +23,13 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
   const [collapseUploader, setCollapseUploader] = useState(true);
   const [droppedFiles, setDroppedFiles] = useState([]);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [dragOverlayVisible, setDragOverlayVisible] = useState(false);
+  const [showChangePw, setShowChangePw] = useState(false);
   const dragCounterRef = useRef(0);
   const uploaderPanelRef = useRef(null);
   const gridRef = useRef(null);
   const [isResizing, setIsResizing] = useState(false);
+  // Desktop/mobile specific behavior is handled in CSS
   const [previewWidth, setPreviewWidth] = useState(0); // px, measured for right panel
   const PREVIEW_MIN = 320;
   const PREVIEW_MAX_HARD = 720;
@@ -167,16 +155,7 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
     };
   }, [userRole]);
 
-  // Close mobile sidebar with Escape key
-  useEffect(() => {
-    const onKey = (e) => {
-      if (e.key === 'Escape') {
-        setSidebarOpen(false);
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  // No left sidebar; Escape handling remains for modals handled within components
 
   // (stats UI removed)
 
@@ -217,6 +196,10 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
   }, [onResizerMove]);
+
+  // Sidebar resizer removed
+
+  // No-op: responsive handled via CSS media queries
 
   const onResizerTouchStart = useCallback((e) => {
     if (!e.touches || !e.touches.length) return;
@@ -260,7 +243,6 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
             aria-expanded={mobileMenuOpen}
             onClick={() => {
               setMobileMenuOpen(v => !v);
-              setSidebarOpen(v => !v);
             }}
           >
             ☰
@@ -277,6 +259,7 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
             <PresetToggle preset={preset} setPreset={setPreset} />
             <StatusBar />
           </div>
+          <button onClick={() => setShowChangePw(true)} className="logout-btn">Change Password</button>
           {userRole === 'admin' && (
             <Link to="/admin" className="admin-link">Admin Panel</Link>
           )}
@@ -296,6 +279,13 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
               )}
               <button
                 className="mobile-menu-item"
+                onClick={() => { setShowChangePw(true); setMobileMenuOpen(false); }}
+                role="menuitem"
+              >
+                🔑 Change Password
+              </button>
+              <button
+                className="mobile-menu-item"
                 onClick={handleLogout}
                 role="menuitem"
               >
@@ -305,30 +295,9 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
           )}
         </div>
       </header>
-      <div className="main-content">
-        <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
-          <div className="sidebar-section">
-            <h3>Folders</h3>
-            <StorageTreeView
-              currentPath={currentPath.replace(/^\/+/, '')}
-              onFolderSelect={(path) => {
-                const normalized = normalizeFilesPath(path);
-                setCurrentPath(normalized);
-                if (typeof window !== 'undefined' && window.innerWidth <= 1024) {
-                  setSidebarOpen(false);
-                }
-              }}
-              refreshTrigger={refreshTrigger}
-              userRole={userRole}
-            />
-          </div>
-          
-  </aside>
-  {/* Backdrop to close off-canvas sidebar on mobile */}
-  {sidebarOpen && (
-          <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} />
-        )}
-
+      <div
+        className="main-content"
+      >
   <div className="content" id="main-content">
           <div
             ref={gridRef}
@@ -448,6 +417,8 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
           </div>
         </div>
       </div>
+
+  <ChangePasswordModal open={showChangePw} onClose={() => setShowChangePw(false)} />
 
   {/* Modal removed; using collapsible uploader panel instead */}
       {/* Global drag-and-drop overlay */}

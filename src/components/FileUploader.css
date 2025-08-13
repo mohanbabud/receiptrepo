@@ -104,6 +104,10 @@
   transform: translateY(-1px);
   box-shadow: 0 4px 12px rgba(30, 64, 175, 0.3);
 }
+.browse-btn:active {
+  transform: translateY(1px) scale(0.99);
+  box-shadow: 0 1px 4px rgba(37, 99, 235, 0.25);
+}
 
 .file-info {
   margin-top: 1rem;

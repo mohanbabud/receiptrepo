@@ -6,14 +6,15 @@ import {
   onSnapshot, 
   doc, 
   updateDoc, 
-  deleteDoc,
   orderBy,
   setDoc
 } from 'firebase/firestore';
-import { deleteObject, ref } from 'firebase/storage';
+import { deleteObject, ref, listAll } from 'firebase/storage';
 import { sendPasswordResetEmail, createUserWithEmailAndPassword } from 'firebase/auth';
 import { db, storage, auth } from '../firebase';
 import { FaArrowLeft, FaCheck, FaTimes, FaUsers, FaFileAlt, FaClock, FaKey, FaEnvelope, FaUserPlus } from 'react-icons/fa';
+import { getFunctions, httpsCallable } from 'firebase/functions';
+import AdminSetPasswordModal from './AdminSetPasswordModal';
 import './AdminPanel.css';
 
 const AdminPanel = ({ user }) => {
@@ -39,6 +40,18 @@ const AdminPanel = ({ user }) => {
   const [addUserLoading, setAddUserLoading] = useState(false);
   const [addUserError, setAddUserError] = useState('');
   const [addUserSuccess, setAddUserSuccess] = useState('');
+  const [setPwTarget, setSetPwTarget] = useState(null);
+  const [showSetPw, setShowSetPw] = useState(false);
+
+  // Optimize existing images (backfill)
+  const [optPrefix, setOptPrefix] = useState('files/');
+  const [optLimit, setOptLimit] = useState(25);
+  const [optMode, setOptMode] = useState('balanced'); // 'lossless' | 'balanced'
+  const [optDryRun, setOptDryRun] = useState(true);
+  const [optOverwrite, setOptOverwrite] = useState(false);
+  const [optLoading, setOptLoading] = useState(false);
+  const [optError, setOptError] = useState('');
+  const [optResult, setOptResult] = useState(null);
 
   useEffect(() => {
     // Listen to requests
@@ -89,17 +102,34 @@ const AdminPanel = ({ user }) => {
   const handleRequestAction = async (requestId, action, adminResponse = '') => {
     try {
       const requestDoc = requests.find(r => r.id === requestId);
-      
+
+      const ensureStoragePath = (p) => String(p || '').replace(/^\/+/, '');
+
+      // Helper: delete folder recursively in Storage
+      const deleteFolderRecursive = async (folderPath) => {
+        const safe = ensureStoragePath(folderPath);
+        const folderRef = ref(storage, safe);
+        const res = await listAll(folderRef);
+        // delete files
+        for (const item of res.items) {
+          try { await deleteObject(item); } catch (_) {}
+        }
+        // recurse into subfolders
+        for (const sub of res.prefixes) {
+          await deleteFolderRecursive(sub.fullPath);
+        }
+      };
+
       if (action === 'approved' && requestDoc.type === 'delete') {
-        // Execute the delete operation
-        const fileDoc = files.find(f => f.id === requestDoc.fileId);
-        if (fileDoc) {
-          // Delete from Storage
-          const fileRef = ref(storage, fileDoc.fullPath);
-          await deleteObject(fileRef);
-          
-          // Delete from Firestore
-          await deleteDoc(doc(db, 'files', fileDoc.id));
+        // Execute the delete operation against Firebase Storage using request.path
+        const targetType = requestDoc.targetType || 'file';
+        const path = ensureStoragePath(requestDoc.path || '');
+        if (path) {
+          if (targetType === 'folder') {
+            await deleteFolderRecursive(path.replace(/\/+$/, ''));
+          } else {
+            try { await deleteObject(ref(storage, path)); } catch (_) {}
+          }
         }
       } else if (action === 'approved' && requestDoc.type === 'rename') {
         // Execute the rename operation
@@ -407,13 +437,22 @@ const AdminPanel = ({ user }) => {
                     <span className={`user-status ${userData.role}`}>
                       {userData.role || 'user'}
                     </span>
-                    <button
-                      className="reset-password-btn"
-                      onClick={() => handlePasswordResetClick(userData)}
-                      title={`Send password reset email to ${userData.email}`}
-                    >
-                      <FaKey />
-                    </button>
+                    <div style={{ display: 'inline-flex', gap: 8 }}>
+                      <button
+                        className="reset-password-btn"
+                        onClick={() => handlePasswordResetClick(userData)}
+                        title={`Send password reset email to ${userData.email}`}
+                      >
+                        <FaEnvelope />
+                      </button>
+                      <button
+                        className="reset-password-btn"
+                        onClick={() => { setSetPwTarget(userData); setShowSetPw(true); }}
+                        title={`Set a new password for ${userData.email}`}
+                      >
+                        <FaKey />
+                      </button>
+                    </div>
                   </div>
                 </td>
               </tr>
@@ -477,6 +516,112 @@ const AdminPanel = ({ user }) => {
           </div>
         </>;
       })()}
+    </div>
+  );
+
+  const runOptimization = async (doDryRun) => {
+    setOptLoading(true);
+    setOptError('');
+    setOptResult(null);
+    try {
+      const regionFns = getFunctions(undefined, 'us-central1');
+      const callable = httpsCallable(regionFns, 'optimizeExistingImages');
+      const payload = {
+        prefix: String(optPrefix || '').replace(/^\/+/, ''),
+        limit: Math.max(0, Number(optLimit) || 0),
+        mode: optMode,
+        dryRun: !!doDryRun,
+        overwrite: !!optOverwrite,
+      };
+      const res = await callable(payload);
+      setOptResult(res && res.data ? res.data : res);
+    } catch (e) {
+      console.error('optimizeExistingImages error', e);
+      setOptError(e?.message || 'Optimization call failed');
+    } finally {
+      setOptLoading(false);
+    }
+  };
+
+  const renderOptimize = () => (
+    <div className="admin-section">
+      <h3>Optimize Existing Images</h3>
+      <p style={{ maxWidth: 820, color: '#555' }}>
+        Compress existing JPEGs in Storage. Start with a dry run to preview size savings.
+      </p>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(220px,1fr))', gap: 12, marginTop: 12 }}>
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <span>Prefix (folder root)</span>
+          <input value={optPrefix} onChange={e => setOptPrefix(e.target.value)} placeholder="files/" />
+        </label>
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <span>Limit (files per run)</span>
+          <input type="number" min={0} value={optLimit} onChange={e => setOptLimit(e.target.value)} />
+        </label>
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <span>Mode</span>
+          <select value={optMode} onChange={e => setOptMode(e.target.value)}>
+            <option value="lossless">Lossless (strip metadata)</option>
+            <option value="balanced">Balanced (≤2000px, q≈85)</option>
+          </select>
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 22 }}>
+          <input type="checkbox" checked={optOverwrite} onChange={e => setOptOverwrite(e.target.checked)} />
+          Overwrite already-optimized
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 22 }}>
+          <input type="checkbox" checked={optDryRun} onChange={e => setOptDryRun(e.target.checked)} />
+          Dry run (no writes)
+        </label>
+      </div>
+      <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
+        <button className="approve-btn" onClick={() => runOptimization(true)} disabled={optLoading}>
+          {optLoading ? 'Running…' : 'Dry Run'}
+        </button>
+        <button className="reject-btn" onClick={() => runOptimization(false)} disabled={optLoading || optDryRun} title={optDryRun ? 'Uncheck Dry run to enable' : ''}>
+          {optLoading ? 'Running…' : 'Execute'}
+        </button>
+      </div>
+      {optError && (
+        <div className="error-message" style={{ marginTop: 12 }}>
+          <FaTimes className="error-icon" /> {optError}
+        </div>
+      )}
+      {optResult && (
+        <div style={{ marginTop: 16 }}>
+          <h4>Result</h4>
+          <div className="files-stats" style={{ marginTop: 8 }}>
+            <div className="stat-card"><h4>Scanned</h4><p>{optResult.scanned}</p></div>
+            <div className="stat-card"><h4>Processed</h4><p>{optResult.processed}</p></div>
+            <div className="stat-card"><h4>Skipped</h4><p>{optResult.skipped}</p></div>
+            <div className="stat-card"><h4>Saved</h4><p>{((optResult.savedBytes || 0)/1024/1024).toFixed(2)} MB</p></div>
+          </div>
+          {Array.isArray(optResult.details) && optResult.details.length > 0 && (
+            <div className="files-table" style={{ marginTop: 12 }}>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Path</th>
+                    <th>Before (KB)</th>
+                    <th>After (KB)</th>
+                    <th>Saved (KB)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {optResult.details.slice(0, 25).map((d, i) => (
+                    <tr key={i}>
+                      <td title={d.path}>{d.path}</td>
+                      <td>{(d.before/1024).toFixed(1)}</td>
+                      <td>{(d.after/1024).toFixed(1)}</td>
+                      <td>{(d.saved/1024).toFixed(1)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 
@@ -696,6 +841,12 @@ const AdminPanel = ({ user }) => {
         >
           <FaFileAlt /> Files ({files.length})
         </button>
+        <button
+          className={`tab-btn ${activeTab === 'optimize' ? 'active' : ''}`}
+          onClick={() => setActiveTab('optimize')}
+        >
+          <FaFileAlt /> Optimize
+        </button>
       </div>
 
       <div className="admin-content">
@@ -703,6 +854,7 @@ const AdminPanel = ({ user }) => {
         {activeTab === 'users' && renderUsers()}
         {activeTab === 'addUsers' && renderAddUsers()}
         {activeTab === 'files' && renderFiles()}
+  {activeTab === 'optimize' && renderOptimize()}
       </div>
 
       {showResetConfirm && (
@@ -787,6 +939,7 @@ const AdminPanel = ({ user }) => {
           </div>
         </div>
       )}
+  <AdminSetPasswordModal open={showSetPw} onClose={() => { setShowSetPw(false); setSetPwTarget(null); }} targetUser={setPwTarget} />
     </div>
   );
 };

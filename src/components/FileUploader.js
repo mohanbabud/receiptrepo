@@ -12,6 +12,8 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
   const [success, setSuccess] = useState('');
   const [uploadTasks, setUploadTasks] = useState({}); // key -> uploadTask
   const [uploadStatus, setUploadStatus] = useState({}); // key -> 'running'|'paused'|'done'|'error'|'canceled'
+  // image optimization mode for JPEGs only: 'balanced' (resize+reencode), 'lossless' (strip metadata only), 'off'
+  const [optMode, setOptMode] = useState('lossless');
   const folderInputRef = useRef(null);
   const cameraInputRef = useRef(null);
   const seededOnceRef = useRef(0);
@@ -30,6 +32,109 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
     if (base !== 'files' && !base.startsWith('files/')) base = `files/${base}`;
     return base.replace(/\\/g, '/').replace(/\/+$/, '');
   };
+
+  // Lossless: strip metadata (EXIF/COM/Photoshop APP13) without re-encoding JPEG bitstream.
+  // If parsing fails, returns the original file.
+  const stripJpegMetadataLossless = useCallback(async (file) => {
+    try {
+      if (!file.type || file.type !== 'image/jpeg') return file;
+      const buf = new Uint8Array(await file.arrayBuffer());
+      if (buf.length < 4 || buf[0] !== 0xFF || buf[1] !== 0xD8) return file; // not SOI
+
+      const out = [];
+      // copy SOI
+      out.push(0xFF, 0xD8);
+      let i = 2;
+      // iterate segments until SOS (FFDA), then copy the rest to keep image data intact
+  while (i + 3 < buf.length) {
+        // expect marker 0xFF??, allow fill bytes 0xFF
+        if (buf[i] !== 0xFF) {
+          // unexpected; bail out and return original
+          return file;
+        }
+        let marker = buf[i + 1];
+        // Skip padding 0xFFs
+        while (marker === 0xFF && i + 2 < buf.length) {
+          i += 1;
+          marker = buf[i + 1];
+        }
+
+        // EOI: copy and stop
+        if (marker === 0xD9) { // EOI
+          out.push(0xFF, 0xD9);
+          i += 2;
+          break;
+        }
+
+        // Start of Scan: copy SOS header then all remaining bytes (entropy-coded data may contain 0xFF markers)
+        if (marker === 0xDA) { // SOS
+          if (i + 3 >= buf.length) return file;
+          const len = (buf[i + 2] << 8) | buf[i + 3];
+          // copy marker + length + SOS header payload
+          for (let k = 0; k < 2 + len; k++) out.push(buf[i + k]);
+          i += 2 + len;
+          // copy the rest (scan data + EOI)
+          for (; i < buf.length; i++) out.push(buf[i]);
+          const optimized = new File([new Uint8Array(out)], file.name, { type: file.type, lastModified: Date.now() });
+          return optimized.size < file.size ? optimized : file;
+        }
+
+        // Markers with payload length
+        if (i + 3 >= buf.length) return file;
+        const len = (buf[i + 2] << 8) | buf[i + 3];
+        if (len < 2 || i + 2 + len > buf.length) return file; // malformed
+
+        const isCOM = marker === 0xFE; // Comment
+        const isAPP1 = marker === 0xE1; // APP1 (EXIF or XMP)
+        const isAPP13 = marker === 0xED; // APP13 Photoshop IRB
+
+        let strip = false;
+        if (isCOM) {
+          strip = true;
+        } else if (isAPP13) {
+          // strip Photoshop IRB (APP13)
+          strip = true;
+        } else if (isAPP1) {
+          // Peek payload to distinguish EXIF vs XMP
+          const payloadStart = i + 4; // skip marker+len
+          const payloadLen = len - 2;
+          if (payloadLen > 0 && payloadStart + payloadLen <= buf.length) {
+            // Check for 'Exif\0\0'
+            const isExif = payloadLen >= 6 &&
+              buf[payloadStart + 0] === 0x45 && // E
+              buf[payloadStart + 1] === 0x78 && // x
+              buf[payloadStart + 2] === 0x69 && // i
+              buf[payloadStart + 3] === 0x66 && // f
+              buf[payloadStart + 4] === 0x00 &&
+              buf[payloadStart + 5] === 0x00;
+            if (isExif) {
+              // Keep EXIF to preserve orientation and camera data
+              strip = false;
+            } else {
+              // XMP typically begins with ASCII URI string
+              const needle = 'http://ns.adobe.com/xap/1.0/';
+              let matches = true;
+              for (let t = 0; t < needle.length && t < payloadLen; t++) {
+                if (buf[payloadStart + t] !== needle.charCodeAt(t)) { matches = false; break; }
+              }
+              strip = matches; // strip XMP
+            }
+          }
+        }
+
+        if (!strip) {
+          // keep this segment
+          for (let k = 0; k < 2 + len; k++) out.push(buf[i + k]);
+        }
+        i += 2 + len;
+      }
+      // If we exited loop without SOS, fall back to original
+      return file;
+    } catch (e) {
+      console.warn('Lossless JPEG metadata strip failed, using original', e);
+      return file;
+    }
+  }, []);
 
   const downscaleImage = useCallback(async (file) => {
     try {
@@ -68,14 +173,23 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
   const preprocessFiles = useCallback(async (files) => {
     const out = [];
     for (const f of files) {
-      if (f.type && f.type.startsWith('image/')) {
-        out.push(await downscaleImage(f));
+      const isJpeg = f.type === 'image/jpeg' || /\.jpe?g$/i.test(f.name || '');
+      if (isJpeg) {
+        if (optMode === 'off') {
+          out.push(f);
+        } else if (optMode === 'lossless') {
+          out.push(await stripJpegMetadataLossless(f));
+        } else {
+          // balanced/default path (resize and re-encode as high-quality JPEG)
+          out.push(await downscaleImage(f));
+        }
       } else {
+        // Leave non-JPEG images untouched
         out.push(f);
       }
     }
     return out;
-  }, [downscaleImage]);
+  }, [downscaleImage, stripJpegMetadataLossless, optMode]);
 
   const performUploads = useCallback(async (acceptedFilesRaw) => {
     if (userRole === 'viewer') {
@@ -255,11 +369,17 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
     };
 
     try {
-      const tasks = fileList.map((file) => {
+      const tasks = fileList.map(async (file) => {
+        // Optimize JPEGs according to current mode
+        const [optFile] = await preprocessFiles([file]);
         // Preserve relative path inside the chosen folder
         const relPathRaw = file.webkitRelativePath || file.name;
         const relPath = relPathRaw.replace(/\\/g, '/').replace(/^\/+/, '');
-        const desiredPath = `${base}/${relPath}`.replace(/\/+/, '/');
+        // If optimization changed filename (e.g., png->jpg via balanced), update the leaf name in relPath
+        let relParts = relPath.split('/');
+        relParts[relParts.length - 1] = optFile.name;
+        const finalRelPath = relParts.join('/');
+        const desiredPath = `${base}/${finalRelPath}`.replace(/\/+/, '/');
         let finalPath = null;
         const computePath = async () => {
           finalPath = await ensureUniquePath(desiredPath);
@@ -267,37 +387,37 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
         };
         return new Promise((resolve, reject) => {
           computePath().then((objectPath) => {
-            const uploadTask = uploadBytesResumable(ref(storage, objectPath), file);
-            setUploadTasks(prev => ({ ...prev, [relPath]: uploadTask }));
+            const uploadTask = uploadBytesResumable(ref(storage, objectPath), optFile);
+            setUploadTasks(prev => ({ ...prev, [finalRelPath]: uploadTask }));
             uploadTask.on(
             'state_changed',
             (snapshot) => {
               const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
-              setUploadProgress(prev => ({ ...prev, [relPath]: progress }));
+              setUploadProgress(prev => ({ ...prev, [finalRelPath]: progress }));
                 const state = snapshot.state;
-                setUploadStatus(prev => ({ ...prev, [relPath]: state === 'paused' ? 'paused' : 'running' }));
+                setUploadStatus(prev => ({ ...prev, [finalRelPath]: state === 'paused' ? 'paused' : 'running' }));
             },
-              (err) => { setUploadStatus(prev => ({ ...prev, [relPath]: err?.code === 'storage/canceled' ? 'canceled' : 'error' })); reject(err); },
+              (err) => { setUploadStatus(prev => ({ ...prev, [finalRelPath]: err?.code === 'storage/canceled' ? 'canceled' : 'error' })); reject(err); },
             async () => {
               try {
                 const finalRef = uploadTask.snapshot.ref;
                 await getDownloadURL(finalRef);
                 // Optional: write metadata to Firestore (best-effort)
                 try {
-                  const dirPart = relPath.split('/').slice(0, -1).join('/');
+                  const dirPart = finalRelPath.split('/').slice(0, -1).join('/');
                   await addDoc(collection(db, 'files'), {
                     id: Date.now() + '_' + Math.random().toString(36).slice(2, 9),
-                    name: file.name,
+                    name: optFile.name,
                     originalName: file.name,
                     path: `/${base}/${dirPart}`,
                     fullPath: finalRef.fullPath,
-                    size: file.size,
-                    type: file.type,
+                    size: optFile.size,
+                    type: optFile.type || file.type,
                     uploadedAt: new Date(),
                     uploadedBy: userRole === 'admin' ? 'admin' : 'user'
                   });
                 } catch (_) { /* ignore metadata errors */ }
-                  setUploadStatus(prev => ({ ...prev, [relPath]: 'done' }));
+                  setUploadStatus(prev => ({ ...prev, [finalRelPath]: 'done' }));
                 resolve();
               } catch (e2) { reject(e2); }
             }
@@ -399,6 +519,14 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
                 <div className="upload-icon">📁</div>
                 <p><strong>Drag & drop files here</strong></p>
                 <p className="or">or</p>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+                  <label htmlFor="optMode" style={{ fontSize: 12, opacity: 0.8 }}>Image optimization:</label>
+                  <select id="optMode" value={optMode} onChange={(e) => setOptMode(e.target.value)} style={{ fontSize: 12 }}>
+                    <option value="balanced">Balanced (resize to 2000px, high quality)</option>
+                    <option value="lossless">Lossless (strip metadata only)</option>
+                    <option value="off">Off</option>
+                  </select>
+                </div>
                 <button
                   type="button"
                   className="browse-btn"

@@ -34,8 +34,9 @@ service cloud.firestore {
     
     // Requests collection - users can create and read their own, admins can read/update all
     match /requests/{requestId} {
+      // On create, use request.resource.data (resource does not exist yet)
       allow create: if request.auth != null && 
-        request.auth.uid == resource.data.requestedBy;
+        request.auth.uid == request.resource.data.requestedBy;
       allow read: if request.auth != null && 
         (request.auth.uid == resource.data.requestedBy ||
          isAdmin(request.auth.uid));

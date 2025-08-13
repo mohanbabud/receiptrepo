@@ -1,7 +1,8 @@
+ 
 import React, { useState, useEffect, useRef } from 'react';
 import { ref, listAll, getMetadata, uploadBytes, deleteObject, getDownloadURL } from 'firebase/storage';
 import { storage, db, auth } from '../firebase';
-import { collection, doc, onSnapshot, setDoc, deleteDoc } from 'firebase/firestore';
+import { collection, doc, onSnapshot, setDoc, deleteDoc, addDoc, serverTimestamp, getDocs, query as fsQuery, where } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 import StorageTreeView from './StorageTreeView';
 import { FaTrash, FaEdit, FaCopy, FaCut, FaStar, FaRegStar } from 'react-icons/fa';
@@ -25,6 +26,8 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   const [loading, setLoading] = useState(true);
   const [includeNestedFiles, setIncludeNestedFiles] = useState(false);
   const [folderView, setFolderView] = useState('cards'); // 'cards' | 'list'
+  // Map of direct counts for each folder: { [folderPath]: { files: number, subfolders: number } }
+  const [folderCounts, setFolderCounts] = useState({});
   const [contextMenu, setContextMenu] = useState({ visible: false, x: 0, y: 0, target: null, type: null });
   const [renamingFolder, setRenamingFolder] = useState(null); // Keeping this for context
   const [renameFolderName, setRenameFolderName] = useState(''); // Keeping this for context
@@ -35,6 +38,8 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   const [successMessage, setSuccessMessage] = useState(''); // Keeping this for context
   const [isError, setIsError] = useState(false); // Keeping this for context
   const [selection, setSelection] = useState({ type: 'background', target: null });
+  // Removed authUser state; rely on auth.currentUser directly
+  const [authReady, setAuthReady] = useState(false);
   const [clipboard, setClipboard] = useState(null); // { action: 'copy'|'cut', itemType: 'file'|'folder', payload }
   const [moveCopyModal, setMoveCopyModal] = useState({ open: false, mode: 'copy', itemType: null, target: null, dest: ROOT_PATH, overwrite: false });
   const [moveCopyBusy, setMoveCopyBusy] = useState(false);
@@ -46,6 +51,12 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   const [labelEditor, setLabelEditor] = useState({ open: false, path: null, tagsText: '', color: '#4b5563' });
   const menuRef = useRef(null);
   const longPressRef = useRef({ timer: null, fired: false, target: null, type: null, startX: 0, startY: 0 });
+  // Cache for folder listings to reduce repeat listAll calls within a short window
+  const folderCacheRef = useRef(new Map()); // Map<string, { items: any[], prefixes: any[], ts: number }>
+  // Token to ignore outdated loadData results when props change quickly
+  const loadTokenRef = useRef(0);
+  // Cache for direct counts per folder to avoid repeated listAll; separate from folderCounts state
+  const countsCacheRef = useRef(new Map()); // Map<string, { files: number, subfolders: number, ts: number }>
 
   const openContextMenuAt = (x, y, target, type) => {
     setContextMenu({ visible: true, x, y, target, type });
@@ -92,10 +103,48 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     setTimeout(() => { lp.fired = false; }, 0);
   };
 
+  // Utility: create .keep files in all empty subfolders under the current folder
+  const createKeepFilesInEmptyFolders = async () => {
+    try {
+      const safe = normalizeFolderPath(currentPath || ROOT_PATH);
+      const folderRef = ref(storage, safe.replace(/^\/+/, ''));
+      const result = await listAll(folderRef);
+      for (const prefix of result.prefixes) {
+        const subRef = ref(storage, prefix.fullPath);
+        const subResult = await listAll(subRef);
+        if (subResult.items.length === 0) {
+          const keepRef = ref(storage, `${prefix.fullPath}/.keep`);
+          await uploadBytes(keepRef, new Uint8Array());
+        }
+      }
+      await loadData();
+      setIsError(false);
+      setSuccessMessage('Added .keep files to all empty subfolders.');
+      setShowSuccessPopup(true);
+    } catch (e) {
+      setIsError(true);
+      setSuccessMessage('Failed to add .keep files.');
+      setShowSuccessPopup(true);
+    }
+  };
+
   useEffect(() => {
+    if (!authReady) return;
     loadData();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentPath, refreshTrigger, includeNestedFiles]);
+  }, [currentPath, refreshTrigger, includeNestedFiles, authReady]);
+
+  // Listen for success messages dispatched from components like FilePreview
+  useEffect(() => {
+    const onSuccess = (e) => {
+      const msg = (e && e.detail && e.detail.message) ? String(e.detail.message) : 'Action completed';
+      setIsError(false);
+      setSuccessMessage(msg);
+      setShowSuccessPopup(true);
+    };
+    window.addEventListener('file-action-success', onSuccess);
+    return () => window.removeEventListener('file-action-success', onSuccess);
+  }, []);
 
   // Subscribe to Firestore metadata for labels and per-user favorites
   useEffect(() => {
@@ -111,7 +160,8 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
 
     // Favorites (per-user)
     let unsubFav = null;
-    const unsubAuth = onAuthStateChanged(auth, (u) => {
+  const unsubAuth = onAuthStateChanged(auth, (u) => {
+      setAuthReady(true);
       if (unsubFav) { try { unsubFav(); } catch {} finally { unsubFav = null; } }
       if (!u) {
         setFavoriteFolders(new Set());
@@ -163,22 +213,70 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   }, [currentPath]);
 
   // Load current folder from Storage (no recursion, minimal metadata)
+  // Retryable wrapper to mitigate early unauthorized/app-check timing
+  const safeGetMetadata = async (storageRef, retries = 1) => {
+    try {
+      return await getMetadata(storageRef);
+    } catch (e) {
+      const code = e && e.code ? String(e.code) : '';
+      if (retries > 0 && (code === 'storage/unauthorized' || code === 'storage/unknown')) {
+        await new Promise(r => setTimeout(r, 600));
+        return safeGetMetadata(storageRef, retries - 1);
+      }
+      throw e;
+    }
+  };
+  // Helper: fallback to fetch size via HEAD on the download URL (reads Content-Length)
+  const fetchSizeViaHead = async (storageRef) => {
+    try {
+      const url = await getDownloadURL(storageRef);
+      const res = await fetch(url, { method: 'HEAD' });
+      const len = res.headers.get('content-length') || res.headers.get('Content-Length');
+      const parsed = len ? parseInt(len, 10) : NaN;
+      return Number.isFinite(parsed) ? parsed : undefined;
+    } catch (_) {
+      return undefined;
+    }
+  };
+
   const loadData = async () => {
     setLoading(true);
+    // Declare token in outer scope so it's visible to finally
+    let myToken;
     try {
       const safe = normalizeFolderPath(currentPath || ROOT_PATH);
       const storagePath = safe.replace(/^\/+/, '').replace(/\/+$/, ''); // files/... (no leading/trailing slash)
       const folderRef = ref(storage, storagePath);
       const folderSet = new Set([ROOT_PATH, safe]);
       const fileList = [];
+      const counts = {}; // will populate direct counts per folder
+      myToken = ++loadTokenRef.current;
 
       if (!includeNestedFiles) {
         // Shallow listing: only direct subfolders and files
-        const result = await listAll(folderRef);
+        // Use cached result if fresh (<= 30s)
+        let result;
+        const cacheKey = safe;
+        const cached = folderCacheRef.current.get(cacheKey);
+        const now = Date.now();
+        if (cached && now - cached.ts <= 30_000) {
+          result = cached;
+        } else {
+          const fresh = await listAll(folderRef);
+          result = { items: fresh.items, prefixes: fresh.prefixes, ts: now };
+          folderCacheRef.current.set(cacheKey, result);
+        }
+        // Count for current folder itself
+        counts[safe] = {
+          files: result.items.length,
+          subfolders: result.prefixes.length
+        };
         for (const prefix of result.prefixes) {
           const subFolderPath = safe + prefix.name + '/';
           folderSet.add(subFolderPath);
+          // Don't count subfolder contents here; defer for visibility to avoid N+1 listAll
         }
+        // Do not prefetch metadata to keep initial load fast; build minimal entries
         for (const item of result.items) {
           const filePath = safe; // direct files
           fileList.push({ id: item.fullPath, name: item.name, path: filePath, ref: item, isStorageFile: true });
@@ -202,23 +300,221 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
           }
         };
         await walk(safe, folderRef);
+
+        // Build direct counts from the aggregated sets
+        // Initialize counts for every folder we know
+        for (const fp of folderSet) {
+          if (!counts[fp]) counts[fp] = { files: 0, subfolders: 0 };
+        }
+        // Count files per parent
+        for (const f of fileList) {
+          const parent = f.path;
+          if (!counts[parent]) counts[parent] = { files: 0, subfolders: 0 };
+          counts[parent].files += 1;
+        }
+        // Count direct subfolders per parent
+        for (const fp of folderSet) {
+          if (fp === ROOT_PATH) continue;
+          const parent = fp.replace(/[^/]+\/$/, '');
+          if (!counts[parent]) counts[parent] = { files: 0, subfolders: 0 };
+          counts[parent].subfolders += 1;
+        }
       }
 
-      setStorageFolders(prev => new Set([...(prev || []), ...folderSet]));
-      setStorageFiles(fileList);
+  // If another load started while awaiting, ignore stale results
+  if (myToken !== loadTokenRef.current) return;
+	setStorageFolders(prev => new Set([...(prev || []), ...folderSet]));
+	setStorageFiles(fileList);
+      setFolderCounts(counts);
+
+      // After load, if any files are missing size, fill sizes in the background for a limited batch.
+      try {
+    const missingAll = fileList.filter(f => typeof f.size !== 'number' && f?.ref);
+        const missing = missingAll.slice(0, 100);
+        if (missing.length) {
+          const CONC = 6;
+          let idx2 = 0;
+          const runners = Array(Math.min(CONC, missing.length)).fill(0).map(async () => {
+            while (idx2 < missing.length) {
+              const j = idx2++;
+              const f = missing[j];
+              let sz;
+              try {
+                const m = await safeGetMetadata(f.ref, 1);
+                sz = typeof m?.size === 'number' ? m.size : undefined;
+              } catch (_) {
+                sz = await fetchSizeViaHead(f.ref);
+              }
+              if (typeof sz === 'number') {
+                setStorageFiles(prev => prev.map(x => x.id === f.id ? { ...x, size: sz } : x));
+              }
+            }
+          });
+          Promise.all(runners).catch(() => {});
+        }
+      } catch (_) { /* ignore */ }
+
+      // Firestore fallback: try to map sizes from 'files' metadata docs by fullPath
+      try {
+        const unknown = fileList.filter(f => typeof f.size !== 'number' && f?.ref?.fullPath).slice(0, 60);
+        if (unknown.length) {
+          const byPath = new Map();
+          const paths = unknown.map(f => f.ref.fullPath);
+          // chunk in batches of 10 (Firestore 'in' limit)
+          const batches = [];
+          for (let i = 0; i < paths.length; i += 10) {
+            const chunk = paths.slice(i, i + 10);
+            batches.push(fsQuery(collection(db, 'files'), where('fullPath', 'in', chunk)));
+          }
+          const snaps = await Promise.all(batches.map(q => getDocs(q)));
+          for (const snap of snaps) {
+            snap.forEach(d => {
+              const data = d.data() || {};
+              if (data.fullPath) byPath.set(data.fullPath, data);
+            });
+          }
+          if (byPath.size) {
+            setStorageFiles(prev => prev.map(x => {
+              if (typeof x.size === 'number') return x;
+              const fp = x?.ref?.fullPath;
+              if (fp && byPath.has(fp)) {
+                const meta = byPath.get(fp);
+                return { ...x, size: typeof meta.size === 'number' ? meta.size : x.size, type: meta.type || x.type };
+              }
+              return x;
+            }));
+          }
+        }
+      } catch (_) { /* ignore */ }
     } catch (error) {
       console.error('Error loading current folder:', error);
     } finally {
-      setLoading(false);
+      // Only clear loading for the most recent load invocation
+      if (myToken === loadTokenRef.current) setLoading(false);
+    }
+  };
+  // Ensure current folder's direct counts are prefetched when path changes
+  useEffect(() => {
+    const safe = normalizeFolderPath(currentPath || ROOT_PATH);
+    fetchDirectCounts(safe);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentPath]);
+
+  // Helper to fetch and cache direct counts for a specific folder path
+  const fetchDirectCounts = async (folderPath) => {
+    try {
+      const key = normalizeFolderPath(folderPath);
+      // If already in state with numbers, skip
+      const existing = folderCounts[key];
+      if (existing && typeof existing.files === 'number' && typeof existing.subfolders === 'number') return existing;
+      // Use cache if fresh (<= 60s)
+      const cached = countsCacheRef.current.get(key);
+      const now = Date.now();
+      if (cached && now - cached.ts <= 60_000) {
+        setFolderCounts(prev => ({ ...prev, [key]: { files: cached.files, subfolders: cached.subfolders } }));
+        return cached;
+      }
+      const folderRef = ref(storage, key.replace(/^\/+/, ''));
+      const res = await listAll(folderRef);
+      const data = { files: res.items.length, subfolders: res.prefixes.length, ts: now };
+      countsCacheRef.current.set(key, data);
+      setFolderCounts(prev => ({ ...prev, [key]: { files: data.files, subfolders: data.subfolders } }));
+      return data;
+    } catch (_) {
+      // Ignore errors; leave counts unknown
+      return null;
     }
   };
 
+  // Prefetch counts for the first few immediate subfolders in the current folder to avoid showing 0
+  useEffect(() => {
+    const safe = normalizeFolderPath(currentPath || ROOT_PATH);
+    if (includeNestedFiles) return;
+    const all = Array.from(storageFolders).filter(fp => fp.startsWith(safe) && fp !== safe && fp.substring(safe.length).split('/').filter(Boolean).length === 1);
+    if (all.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const first = all.slice(0, 12);
+      for (const fp of first) {
+        if (cancelled) break;
+        await fetchDirectCounts(fp);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentPath, includeNestedFiles, storageFolders]);
+
+  // Prefetch metadata lazily for currently visible page items to improve UX without blocking initial load
+  useEffect(() => {
+    const safe = normalizeFolderPath(currentPath || ROOT_PATH);
+    // Only for shallow view; deep can be large
+    if (includeNestedFiles) return;
+    // Compute current page items similar to renderFilesForPath pagination
+    let files = storageFiles.filter(f => f.path === safe && f.name !== '.keep' && f.name !== '.folder-placeholder');
+    if (fileFilter) files = files.filter(f => f.name.toLowerCase().includes(fileFilter.toLowerCase()));
+    const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+    files = files.sort((a, b) => {
+      let cmp = 0;
+      if (fileSort === 'name') cmp = collator.compare(a.name || '', b.name || '');
+      else if (fileSort === 'size') cmp = (a.size || 0) - (b.size || 0);
+      else if (fileSort === 'type') cmp = collator.compare(a.type || '', b.type || '');
+      return fileSortDir === 'asc' ? cmp : -cmp;
+    });
+    const start = (filePage - 1) * pageSize;
+    const pageItems = files.slice(start, start + pageSize);
+    // Fetch a few at a time
+    let cancelled = false;
+    const fetchOne = async (f) => { if (!cancelled) await ensureFileMeta(f); };
+    (async () => {
+      const BATCH = 4;
+      const slice = pageItems.filter(f => typeof f.size !== 'number').slice(0, 24);
+      for (let i = 0; i < slice.length; i += BATCH) {
+        const chunk = slice.slice(i, i + BATCH);
+        await Promise.all(chunk.map(fetchOne));
+        if (cancelled) break;
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storageFiles, filePage, pageSize, fileFilter, fileSort, fileSortDir, includeNestedFiles, currentPath]);
+
   // UI helpers
   const formatFileSize = (bytes) => {
-    if (!bytes) return 'Unknown size';
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(1024));
-    return Math.round(bytes / Math.pow(1024, i) * 100) / 100 + ' ' + sizes[i];
+    if (typeof bytes !== 'number') return 'Unknown';
+    if (bytes === 0) return '0 Bytes';
+    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.min(sizes.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+    const value = bytes / Math.pow(1024, i);
+    const rounded = value >= 100 ? Math.round(value) : Math.round(value * 100) / 100;
+    return `${rounded} ${sizes[i]}`;
+  };
+
+  // Lazily ensure metadata for a specific file (size/type) if missing
+  const ensureFileMeta = async (fileItem) => {
+    try {
+      if (!fileItem?.ref || typeof fileItem.size === 'number') return;
+      let meta = null;
+  try { meta = await safeGetMetadata(fileItem.ref, 1); } catch (_) { meta = null; }
+      if (meta) {
+        setStorageFiles(prev => prev.map(f => {
+          if (f.id !== fileItem.id) return f;
+          return {
+            ...f,
+            size: typeof meta?.size === 'number' ? meta.size : f.size,
+            type: meta?.contentType || f.type,
+            uploadedAt: meta?.updated ? new Date(meta.updated) : f.uploadedAt,
+          };
+        }));
+        return;
+      }
+      // Fallback to HEAD if metadata blocked
+      const sz = await fetchSizeViaHead(fileItem.ref);
+      if (typeof sz === 'number') {
+        setStorageFiles(prev => prev.map(f => f.id === fileItem.id ? { ...f, size: sz } : f));
+      }
+    } catch (_) {
+      // ignore
+    }
   };
 
   const getFileIcon = (fileName, fileType) => {
@@ -236,6 +532,67 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     e.preventDefault();
     setContextMenu({ visible: true, x: e.clientX, y: e.clientY, target, type });
   setSelection({ type, target });
+  };
+
+  // Confirm helpers
+  // For normal users: request deletion instead of direct delete
+  const requestDelete = async (target, targetType /* 'file' | 'folder' */) => {
+    try {
+      const user = auth.currentUser;
+      if (!user) { alert('Sign in required.'); return; }
+      // Normalize payload for existing Admin/Request panels (collection: 'requests')
+      // Expect fields: type: 'delete', path, fileName (optional), targetType: 'file'|'folder'
+      const path = targetType === 'file' ? (target?.id || target?.ref?.fullPath || '') : String(target || '');
+      const fileName = targetType === 'file'
+        ? (target?.name || (path.split('/').pop() || ''))
+        : (String(path).split('/').filter(Boolean).pop() || '');
+      const req = {
+        type: 'delete',
+        targetType: targetType,
+        path,
+        fileName,
+        requestedBy: user.uid,
+        requestedEmail: user.email,
+        requestedAt: serverTimestamp(),
+        status: 'pending',
+      };
+      await addDoc(collection(db, 'requests'), req);
+      setIsError(false);
+      setSuccessMessage('Delete request submitted for admin review.');
+      setShowSuccessPopup(true);
+    } catch (e) {
+      setIsError(true);
+      setSuccessMessage('Error submitting delete request.');
+      setShowSuccessPopup(true);
+    }
+  };
+  const confirmAndDeleteFolder = async (folderPath) => {
+    if (userRole !== 'admin') {
+      await requestDelete(folderPath, 'folder');
+      return;
+    }
+    if (!folderPath) return;
+    const name = String(folderPath).split('/').filter(Boolean).pop() || 'this folder';
+    const ok = window.confirm(`Delete "${name}" and all its contents? This cannot be undone.`);
+    if (!ok) return;
+    await handleDeleteFolder(folderPath);
+  };
+  const confirmAndDeleteFile = async (fileItem) => {
+    if (userRole !== 'admin') {
+      await requestDelete(fileItem, 'file');
+      return;
+    }
+    if (!fileItem) return;
+    const name = fileItem?.name || 'this file';
+    const ok = window.confirm(`Delete "${name}"? This cannot be undone.`);
+    if (!ok) return;
+    await handleDeleteFile(fileItem);
+  };
+  const confirmAndDeleteSelection = async (files, folders) => {
+    const fc = (files?.length || 0);
+    const dc = (folders?.length || 0);
+    if (fc + dc === 0) return false;
+    return window.confirm(`Permanently delete ${fc} file(s) and ${dc} folder(s)? This cannot be undone.`);
   };
   const hideContextMenu = () => setContextMenu({ visible: false, x: 0, y: 0, target: null, type: null });
   const toggleSelectFile = (fileItem) => {
@@ -293,6 +650,8 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     const files = storageFiles.filter(f => selectedFiles.has(f.id));
     const folders = Array.from(selectedFolders);
     if (files.length === 0 && folders.length === 0) return;
+    const ok = await confirmAndDeleteSelection(files, folders);
+    if (!ok) return;
     try {
       // Delete files
       for (const f of files) {
@@ -326,8 +685,8 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
         } else if (action === 'create-file') {
           await handleNewFile(folderPath);
         } else if (action === 'delete') {
-          if (userRole !== 'admin') { alert('Only admin can delete.'); hideContextMenu(); return; }
-          await handleDeleteFolder(folderPath);
+          // Route through confirm helper which handles admin vs. user (request-delete) logic
+          await confirmAndDeleteFolder(folderPath);
         } else if (action === 'copy') {
           setMoveCopyModal({ open: true, mode: 'copy', itemType: 'folder', target: folderPath, dest: normalizeFolderPath(currentPath || ROOT_PATH) });
         } else if (action === 'move') {
@@ -347,8 +706,8 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
         if (action === 'rename') {
           await handleRenameFile(fileItem);
         } else if (action === 'delete') {
-          if (userRole !== 'admin') { alert('Only admin can delete.'); hideContextMenu(); return; }
-          await handleDeleteFile(fileItem);
+          // Route through confirm helper which handles admin vs. user (request-delete) logic
+          await confirmAndDeleteFile(fileItem);
         } else if (action === 'copy') {
           setMoveCopyModal({ open: true, mode: 'copy', itemType: 'file', target: fileItem, dest: normalizeFolderPath(currentPath || ROOT_PATH) });
         } else if (action === 'move') {
@@ -467,14 +826,13 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
       }
       return;
     }
-    // Delete (admin only)
+    // Delete: admins delete directly; non-admins submit a request
     if (key === 'Delete') {
       e.preventDefault();
-      if (userRole !== 'admin') return;
       if (selection.type === 'folder' && selection.target) {
-        await handleDeleteFolder(selection.target);
+        await confirmAndDeleteFolder(selection.target);
       } else if (selection.type === 'file' && selection.target) {
-        await handleDeleteFile(selection.target);
+        await confirmAndDeleteFile(selection.target);
       }
       return;
     }
@@ -525,39 +883,45 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     }
   };
 
-  // Rename folder in Firebase Storage
+  // Rename folder in Firebase Storage (recursive, preserves structure)
   const handleRenameFolder = async () => {
     if (!renamingFolder || !renameFolderName.trim()) return;
-    const oldPath = renamingFolder;
-    const newPath = oldPath.replace(/[^/]+\/$/, renameFolderName + '/');
-    try {
-      // Move all files from oldPath to newPath
-      const folderRef = ref(storage, oldPath);
-      const result = await listAll(folderRef);
-      let moved = false;
-      for (const item of result.items) {
-        try {
-          const fileBytes = await import('firebase/storage').then(mod => mod.getBytes(item));
-          const newFileRef = ref(storage, item.fullPath.replace(oldPath, newPath));
-          await uploadBytes(newFileRef, fileBytes);
-          await deleteObject(item);
-          moved = true;
-        } catch (err) {
-          console.error('Error moving file:', item.fullPath, err);
-        }
-      }
-      // If folder is empty, create a .keep file in newPath and delete .keep in oldPath
-      if (!moved) {
-        const oldKeepRef = ref(storage, oldPath + '.keep');
-        try { await deleteObject(oldKeepRef); } catch (e) {}
-        const newKeepRef = ref(storage, newPath + '.keep');
-        await uploadBytes(newKeepRef, new Uint8Array());
-      }
+    const oldPath = normalizeFolderPath(renamingFolder);
+    const parent = oldPath.replace(/[^/]+\/$/, '');
+    const newPath = (parent + renameFolderName.trim().replace(/^\/+|\/+$/g, '') + '/').replace(/\/+/, '/');
+    if (newPath === oldPath) {
       setRenamingFolder(null);
       setRenameFolderName('');
+      return;
+    }
+    try {
+      // Recursively move all contents and clean originals
+      await copyFolder(oldPath, newPath, true, false, { silent: true });
+      // Attempt to remove any lingering placeholder at old root; ensure visibility at new root
+      try { await deleteObject(ref(storage, oldPath.replace(/^\/+/, '') + '.keep')); } catch (_) {}
+      try { await uploadBytes(ref(storage, newPath.replace(/^\/+/, '') + '.keep'), new Uint8Array()); } catch (_) {}
+
+      // Update expanded folders and current path
+      setExpandedFolders(prev => {
+        const next = new Set(prev || []);
+        next.delete(oldPath);
+        next.add(newPath);
+        return next;
+      });
+      try {
+        const cur = normalizeFolderPath(currentPath || ROOT_PATH);
+        if (cur.startsWith(oldPath) && typeof onPathChange === 'function') {
+          const nextPath = (newPath + cur.substring(oldPath.length)).replace(/\/+/, '/');
+          onPathChange(nextPath);
+        }
+      } catch {}
+
+      setRenamingFolder(null);
+      setRenameFolderName('');
+      setIsError(false);
       setSuccessMessage('Folder renamed successfully!');
       setShowSuccessPopup(true);
-      loadData();
+      await loadData();
     } catch (error) {
       setIsError(true);
       setSuccessMessage('Error renaming folder: ' + (error.message || error.toString()));
@@ -770,16 +1134,48 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   const handleDeleteFolder = async (folderPath) => {
     if (!folderPath) return;
     try {
-      const folderRef = ref(storage, folderPath);
+      // Normalize to '/files/.../' and strip leading slash for Storage ref
+      const base = normalizeFolderPath(folderPath);
+      if (base === ROOT_PATH) { alert('Cannot delete the root folder.'); return; }
+      const folderRef = ref(storage, base.replace(/^\/+/, ''));
       const result = await listAll(folderRef);
+
+      // Delete files in this folder (ignore 404s for already-removed files)
       for (const item of result.items) {
-        await deleteObject(item);
+        try {
+          await deleteObject(item);
+        } catch (e) {
+          // Ignore not-found errors; surface others
+          if (!(e && (e.code === 'storage/object-not-found' || /404/.test(String(e.status || ''))))) {
+            throw e;
+          }
+        }
       }
+
+      // Recurse into subfolders
       for (const prefix of result.prefixes) {
-        await handleDeleteFolder(prefix.fullPath);
+        try {
+          // prefix.fullPath is like 'files/..'; normalize for our helper
+          await handleDeleteFolder('/' + prefix.fullPath + '/');
+        } catch (e) {
+          // Continue deleting other subfolders; collect via outer catch if needed
+          if (!(e && (e.code === 'storage/object-not-found' || /404/.test(String(e.status || ''))))) {
+            throw e;
+          }
+        }
       }
-      setSuccessMessage('Folder deleted successfully!');
+
+  const deletedName = (base.split('/').filter(Boolean).pop()) || 'Folder';
+  setSuccessMessage(`${deletedName} deleted successfully!`);
       setShowSuccessPopup(true);
+      // If we deleted the currently open folder, navigate to its parent
+      try {
+        const cur = normalizeFolderPath(currentPath || ROOT_PATH);
+        if (cur === base) {
+          const parent = base.replace(/[^/]+\/$/, '');
+          if (parent && typeof onPathChange === 'function') onPathChange(parent || ROOT_PATH);
+        }
+      } catch {}
       loadData();
     } catch (error) {
       setIsError(true);
@@ -974,6 +1370,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
             <div
               key={file.id}
               className={`file-grid-item ${selection.type === 'file' && selection.target?.id === file.id ? 'selected' : ''}`}
+              onMouseEnter={() => { if (typeof file.size !== 'number') ensureFileMeta(file); }}
               onClick={async () => {
                 setSelection({ type: 'file', target: file });
                 if (!onFileSelect) return;
@@ -1025,7 +1422,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                     <FaCut />
                   </button>
                   {userRole === 'admin' && (
-                    <button className="icon-btn delete" title="Delete" onClick={async () => { await handleDeleteFile(file); }}>
+                    <button className="icon-btn delete" title="Delete" onClick={async () => { await confirmAndDeleteFile(file); }}>
                       <FaTrash />
                     </button>
                   )}
@@ -1077,19 +1474,22 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
 
     if (subfolders.length === 0) return <div className="empty-state">No subfolders.</div>;
 
-    if (folderView === 'cards') {
+  if (folderView === 'cards') {
       return (
         <div className="folder-card-grid">
           {subfolders.map(folderPath => {
             const folderName = folderPath.substring(safe.length).replace('/', '');
-            const filesInFolder = storageFiles.filter(f => f.path === folderPath && f.name !== '.keep' && f.name !== '.folder-placeholder').length;
+      const directCounts = folderCounts[folderPath];
+      const filesInFolder = typeof directCounts?.files === 'number' ? String(directCounts.files) : '…';
+      const subfoldersInFolder = typeof directCounts?.subfolders === 'number' ? String(directCounts.subfolders) : '…';
             return (
               <div
                 key={folderPath + '-card-only'}
                 className={`folder-card ${currentPath === folderPath ? 'active' : ''}`}
-                title={`Folder: ${folderName} (${filesInFolder} files)`}
-                onClick={(e) => { if (longPressRef.current.fired) { e.preventDefault(); return; } setExpandedFolders(prev => new Set(prev).add(folderPath)); onPathChange(folderPath); }}
+                title={`Folder: ${folderName} (${subfoldersInFolder} subfolders, ${filesInFolder} files)`}
+        onClick={(e) => { if (longPressRef.current.fired) { e.preventDefault(); return; } setExpandedFolders(prev => new Set(prev).add(folderPath)); onPathChange(folderPath); }}
                 onContextMenu={e => handleContextMenu(e, folderPath, 'folder')}
+        onMouseEnter={() => { fetchDirectCounts(folderPath); }}
                 onTouchStart={(e) => startLongPress(e, folderPath, 'folder')}
                 onTouchMove={moveLongPress}
                 onTouchEnd={endLongPress}
@@ -1109,7 +1509,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                         {favoriteFolders.has(folderPath) ? <FaStar color="#f59e0b" /> : <FaRegStar />}
                       </button>
                     </div>
-                    <div className="folder-card-meta" style={{ visibility: 'hidden' }}>.</div>
+                    <div className="folder-card-meta">{subfoldersInFolder} subfolders • {filesInFolder} files</div>
                   </div>
                 </div>
                 {userRole !== 'viewer' && (
@@ -1135,7 +1535,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                       <FaCut />
                     </button>
                     {userRole === 'admin' && (
-                      <button className="icon-btn delete" title="Delete" onClick={async () => { await handleDeleteFolder(folderPath); }}>
+                      <button className="icon-btn delete" title="Delete" onClick={async () => { await confirmAndDeleteFolder(folderPath); }}>
                         <FaTrash />
                       </button>
                     )}
@@ -1153,6 +1553,9 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
       <div className="subfolder-list" style={{ display: 'grid', gap: 8, padding: '8px 4px' }}>
         {subfolders.map(folderPath => {
           const folderName = folderPath.substring(safe.length).replace('/', '');
+          const directCounts = folderCounts[folderPath];
+          const filesInFolder = typeof directCounts?.files === 'number' ? String(directCounts.files) : '…';
+          const subfoldersInFolder = typeof directCounts?.subfolders === 'number' ? String(directCounts.subfolders) : '…';
           return (
             <div
               key={folderPath + '-row-only'}
@@ -1160,10 +1563,12 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
               title={`Open folder ${folderName}`}
               onClick={(e) => { if (longPressRef.current.fired) { e.preventDefault(); return; } setExpandedFolders(prev => new Set(prev).add(folderPath)); onPathChange(folderPath); }}
               onContextMenu={(e) => handleContextMenu(e, folderPath, 'folder')}
+              onMouseEnter={() => { fetchDirectCounts(folderPath); }}
             >
               <div className="item-content">
                 <MacFolderIcon className="folder-icon" />
                 <span className="folder-name">{folderName}</span>
+                <span className="folder-card-meta" style={{ marginLeft: 8 }}>{subfoldersInFolder} subfolders • {filesInFolder} files</span>
               </div>
             </div>
           );
@@ -1298,6 +1703,14 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
               style={{ marginRight: '8px' }}
             />
           )}
+          <button
+            className="action-btn"
+            style={{ background: '#f3f4f6', color: '#334155', border: '1px solid #ddd', borderRadius: 6, padding: '6px 12px', marginRight: 8 }}
+            onClick={createKeepFilesInEmptyFolders}
+            title="Add .keep files to all empty subfolders"
+          >
+            Add .keep to empty subfolders
+          </button>
           <select className="file-sort-select" value={fileSort} onChange={e => setFileSort(e.target.value)}>
             <option value="name">Sort by Name</option>
             <option value="size">Sort by Size</option>
@@ -1321,14 +1734,18 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
       {/* Lightweight stats for the current folder to aid clarity */}
       {(() => {
         const safe = normalizeFolderPath(currentPath || ROOT_PATH);
-        const directSubfolders = Array.from(storageFolders).filter(fp => fp.startsWith(safe) && fp !== safe && fp.substring(safe.length).split('/').filter(Boolean).length === 1).length;
-        const directFiles = storageFiles.filter(f => f.path === safe && f.name !== '.keep' && f.name !== '.folder-placeholder').length;
-        const nestedFiles = includeNestedFiles ? storageFiles.filter(f => f.path.startsWith(safe) && f.name !== '.keep' && f.name !== '.folder-placeholder').length : null;
+        const fc = folderCounts[safe];
+        // Prefer cached counts; fall back to quick local compute; show … if loading
+        const quickSubfolders = Array.from(storageFolders).filter(fp => fp.startsWith(safe) && fp !== safe && fp.substring(safe.length).split('/').filter(Boolean).length === 1).length;
+        const quickFiles = storageFiles.filter(f => f.path === safe && f.name !== '.keep' && f.name !== '.folder-placeholder').length;
+        const directSubfolders = typeof fc?.subfolders === 'number' ? fc.subfolders : (loading ? null : quickSubfolders);
+        const directFiles = typeof fc?.files === 'number' ? fc.files : (loading ? null : quickFiles);
+        const nestedFiles = includeNestedFiles ? (loading ? null : storageFiles.filter(f => f.path.startsWith(safe) && f.name !== '.keep' && f.name !== '.folder-placeholder').length) : null;
         return (
           <div className="folder-stats" style={{ margin: '8px 4px', fontSize: 12, color: '#556', display: 'flex', gap: 12 }}>
             <span title="Current folder path">Path: {safe}</span>
-            <span title="Direct subfolders count">Subfolders: {directSubfolders}</span>
-            <span title="Direct files count">Files: {directFiles}{nestedFiles !== null ? ` (including nested: ${nestedFiles})` : ''}</span>
+            <span title="Direct subfolders count">Subfolders: {directSubfolders == null ? '…' : directSubfolders}</span>
+            <span title="Direct files count">Files: {directFiles == null ? '…' : directFiles}{nestedFiles !== null ? ` (including nested: ${nestedFiles == null ? '…' : nestedFiles})` : ''}</span>
           </div>
         );
       })()}
@@ -1341,8 +1758,10 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
               <div className="context-menu-item" role="menuitem" tabIndex={0} style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-folder')} onKeyDown={(e)=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); handleMenuAction('create-folder'); }}}>📁 New Subfolder</div>
               <div className="context-menu-item" role="menuitem" tabIndex={0} style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-file')} onKeyDown={(e)=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); handleMenuAction('create-file'); }}}>📄 New File</div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('rename')}>✏️ Rename</div>
-              {userRole === 'admin' && (
+              {(userRole === 'admin') ? (
                 <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer', color: '#d9534f' }} onClick={() => handleMenuAction('delete')}>🗑️ Delete</div>
+              ) : (
+                <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer', color: '#f59e42' }} onClick={() => handleMenuAction('delete')}>📝 Request Delete</div>
               )}
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('copy')}>📋 Copy</div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('move')}>📦 Move</div>
@@ -1358,8 +1777,10 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-file')}>📄 New File</div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-folder')}>📁 New Folder</div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('rename')}>✏️ Rename</div>
-              {userRole === 'admin' && (
+              {(userRole === 'admin') ? (
                 <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer', color: '#d9534f' }} onClick={() => handleMenuAction('delete')}>🗑️ Delete</div>
+              ) : (
+                <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer', color: '#f59e42' }} onClick={() => handleMenuAction('delete')}>📝 Request Delete</div>
               )}
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('copy')}>📋 Copy</div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('move')}>📦 Move</div>
@@ -1451,9 +1872,10 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
               <button onClick={() => setMoveCopyModal({ open: false, mode: 'copy', itemType: null, target: null, dest: ROOT_PATH })} style={{ border: 'none', background: 'transparent', fontSize: 18, cursor: 'pointer' }}>✕</button>
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 0 }}>
-              <div style={{ padding: 12, borderRight: '1px solid #eee' }}>
+              <div style={{ padding: 12, borderRight: '1px solid #eee', maxHeight: '70vh', overflow: 'auto' }}>
                 <StorageTreeView
                   currentPath={(moveCopyModal.dest || ROOT_PATH).replace(/^\/+/, '').replace(/\\/g,'/')}
+                  initialDepth={6}
                   onFolderSelect={(p) => {
                     // Normalize to '/files/.../' form
                     const normalized = (() => {
@@ -1471,6 +1893,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                     })();
                     setMoveCopyModal(prev => ({ ...prev, dest: normalized }));
                   }}
+                  userRole="viewer"
                 />
               </div>
               <div style={{ padding: 16 }}>

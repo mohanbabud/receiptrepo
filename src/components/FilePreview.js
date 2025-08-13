@@ -1,9 +1,9 @@
 /* eslint-disable react-hooks/rules-of-hooks */
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import { deleteObject, ref, getDownloadURL, getMetadata } from 'firebase/storage';
 import { doc, deleteDoc, addDoc, collection, updateDoc } from 'firebase/firestore';
 import { storage, db } from '../firebase';
-import { FaTimes, FaDownload, FaTrash, FaEdit } from 'react-icons/fa';
+import { FaTimes, FaDownload, FaTrash, FaEdit, FaExpand, FaCompress } from 'react-icons/fa';
 import './FilePreview.css';
 
 const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
@@ -11,7 +11,46 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
   const [newName, setNewName] = useState(file.originalName || file.name);
   const [isRenaming, setIsRenaming] = useState(false);
   const [details, setDetails] = useState({ url: file.downloadURL, type: file.type, size: file.size, uploadedAt: file.uploadedAt, fullPath: file.fullPath });
-  const isPlaceholder = file.name === '.folder-placeholder' || file.name === '.folder_placeholder';
+  const [textPreview, setTextPreview] = useState(null);
+  const [imageFit, setImageFit] = useState('contain'); // 'contain' | 'cover'
+  const isPlaceholder = file.name === '.folder-placeholder' || file.name === '.folder_placeholder' || file.name === '.keep';
+
+  // Helper: infer MIME from filename when metadata is missing or generic
+  const inferMimeFromName = (name = '') => {
+    const ext = String(name).toLowerCase().split('.').pop();
+    switch (ext) {
+      case 'pdf': return 'application/pdf';
+      case 'jpg':
+      case 'jpeg': return 'image/jpeg';
+      case 'png': return 'image/png';
+      case 'gif': return 'image/gif';
+      case 'webp': return 'image/webp';
+      case 'avif': return 'image/avif';
+      case 'svg': return 'image/svg+xml';
+      case 'mp4': return 'video/mp4';
+      case 'webm': return 'video/webm';
+      case 'ogv':
+      case 'ogg': return 'video/ogg';
+      case 'mp3': return 'audio/mpeg';
+      case 'wav': return 'audio/wav';
+      case 'm4a': return 'audio/mp4';
+      case 'csv': return 'text/csv';
+      case 'txt':
+      case 'log': return 'text/plain';
+      case 'json': return 'application/json';
+      case 'xml': return 'application/xml';
+      case 'html':
+      case 'htm': return 'text/html';
+      case 'md': return 'text/markdown';
+      default: return '';
+    }
+  };
+  const extMime = useMemo(() => inferMimeFromName(file?.name), [file?.name]);
+  const effectiveType = useMemo(() => {
+    const raw = (details?.type || file?.type || '').toLowerCase();
+    if (!raw || raw === 'application/octet-stream') return (extMime || raw);
+    return raw;
+  }, [details?.type, file?.type, extMime]);
 
   useEffect(() => {
     let mounted = true;
@@ -43,6 +82,27 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
     })();
     return () => { mounted = false; };
   }, [file]);
+
+  // Fetch small text-based files for inline preview
+  useEffect(() => {
+    const t = (effectiveType || '').toLowerCase();
+    setTextPreview(null);
+    if (!details?.url) return;
+    const isText = t.startsWith('text/') || t === 'application/json' || t === 'application/xml' || t === 'text/csv';
+    if (!isText) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(details.url);
+        if (!res.ok) return;
+        const txt = await res.text();
+        if (!cancelled) setTextPreview(txt);
+      } catch (_) {
+        // ignore fetch errors, fall back to generic info
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [details.url, effectiveType]);
 
   // Auto-close placeholder files via effect to avoid conditional returns before hooks
   useEffect(() => {
@@ -115,6 +175,11 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
           try { await deleteDoc(doc(db, 'files', file.id)); } catch (_) {}
         }
         
+        // Notify outer UI (FolderTree) to show a success popup, then refresh and close
+        try {
+          const msg = `"${file.name}" deleted successfully!`;
+          window.dispatchEvent(new CustomEvent('file-action-success', { detail: { message: msg } }));
+        } catch (_) {}
         onFileAction();
         onClose();
       } catch (error) {
@@ -170,46 +235,77 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
   };
 
   const renderPreview = () => {
-    const t = (details.type || file.type || '').toLowerCase();
+    const t = (effectiveType || '').toLowerCase();
+    // Images
     if (t.startsWith('image/')) {
       return (
-        <div className="preview-image-content">
+        <div className="image-preview">
           {details.url ? (
-            <img src={details.url} alt={file.name} style={{ maxWidth: '100%', borderRadius: '8px' }} />
+            <img src={details.url} alt={file.name} className={`fit-${imageFit}`} draggable={false} />
           ) : (
             <div style={{ padding: 12, color: '#666' }}>Fetching preview…</div>
-          )}
-          <h3>File Information</h3>
-          <p><strong>Name:</strong> {file.name}</p>
-          <p><strong>Type:</strong> {details.type || file.type || 'Unknown'}</p>
-          <p><strong>Size:</strong> {typeof details.size === 'number' ? (details.size / 1024 / 1024).toFixed(2) + ' MB' : 'Unknown'}</p>
-          <p><strong>Uploaded:</strong> {details.uploadedAt?.toLocaleDateString?.() || file.uploadedAt?.toDate?.()?.toLocaleDateString() || 'Unknown'}</p>
-          <p><strong>Path:</strong> {file.path}</p>
-          {(file.ocrStatus || file.ocrText) && (
-            <div className="ocr-section" style={{ marginTop: 12 }}>
-              <h3>OCR</h3>
-              {file.ocrStatus === 'pending' && !file.ocrText && (
-                <p>Extracting text…</p>
-              )}
-              {file.ocrStatus === 'error' && (
-                <p style={{ color: '#b42318' }}>OCR failed.</p>
-              )}
-              {file.ocrText && (
-                <pre style={{ whiteSpace: 'pre-wrap', background: '#f3f4f6', padding: 8, borderRadius: 6 }}>{file.ocrText}</pre>
-              )}
-            </div>
           )}
         </div>
       );
     }
-    // ...other file type previews...
+    // PDFs
+    if (t === 'application/pdf') {
+      return (
+        <div className="pdf-preview">
+          {details.url ? (
+            <iframe title={file.name} src={`${details.url}#toolbar=0&navpanes=0`} />
+          ) : (
+            <div style={{ padding: 12, color: '#666' }}>Fetching preview…</div>
+          )}
+        </div>
+      );
+    }
+    // Video
+    if (t.startsWith('video/')) {
+      return (
+        <div style={{ width: '100%' }}>
+          {details.url ? (
+            <video src={details.url} controls style={{ width: '100%', maxHeight: 520, borderRadius: 8 }} />
+          ) : (
+            <div style={{ padding: 12, color: '#666' }}>Fetching preview…</div>
+          )}
+        </div>
+      );
+    }
+    // Audio
+    if (t.startsWith('audio/')) {
+      return (
+        <div style={{ width: '100%', textAlign: 'center' }}>
+          {details.url ? (
+            <audio src={details.url} controls style={{ width: '100%' }} />
+          ) : (
+            <div style={{ padding: 12, color: '#666' }}>Fetching preview…</div>
+          )}
+        </div>
+      );
+    }
+    // Text-like
+    if (t.startsWith('text/') || t === 'application/json' || t === 'application/xml' || t === 'text/csv') {
+      return (
+        <div style={{ width: '100%' }}>
+          {textPreview ? (
+            <pre style={{ whiteSpace: 'pre-wrap', background: '#f3f4f6', padding: 12, borderRadius: 8, maxHeight: 520, overflow: 'auto' }}>{textPreview}</pre>
+          ) : details.url ? (
+            <div style={{ padding: 12, color: '#666' }}>Fetching preview…</div>
+          ) : (
+            <div style={{ padding: 12, color: '#666' }}>Preview unavailable</div>
+          )}
+        </div>
+      );
+    }
+    // Fallback – generic info
     return (
       <div className="preview-generic-content">
         <h3>File Information</h3>
         <p><strong>Name:</strong> {file.name}</p>
-  <p><strong>Type:</strong> {details.type || file.type || 'Unknown'}</p>
-  <p><strong>Size:</strong> {typeof details.size === 'number' ? (details.size / 1024 / 1024).toFixed(2) + ' MB' : 'Unknown'}</p>
-  <p><strong>Uploaded:</strong> {details.uploadedAt?.toLocaleDateString?.() || file.uploadedAt?.toDate?.()?.toLocaleDateString() || 'Unknown'}</p>
+        <p><strong>Type:</strong> {details.type || file.type || 'Unknown'}</p>
+        <p><strong>Size:</strong> {typeof details.size === 'number' ? (details.size / 1024 / 1024).toFixed(2) + ' MB' : 'Unknown'}</p>
+        <p><strong>Uploaded:</strong> {details.uploadedAt?.toLocaleDateString?.() || file.uploadedAt?.toDate?.()?.toLocaleDateString() || 'Unknown'}</p>
         <p><strong>Path:</strong> {file.path}</p>
         <p className="preview-note">Preview not available for this file type</p>
       </div>
@@ -237,6 +333,16 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
               )}
             </div>
             <div className="preview-actions">
+              {/* Image Fit/Fill toggle (only for images) */}
+              {String(effectiveType || '').toLowerCase().startsWith('image/') && (
+                <button
+                  onClick={() => setImageFit(f => (f === 'contain' ? 'cover' : 'contain'))}
+                  className="action-btn"
+                  title={imageFit === 'contain' ? 'Switch to Fill (cover)' : 'Switch to Fit (contain)'}
+                >
+                  {imageFit === 'contain' ? <FaExpand /> : <FaCompress />}
+                </button>
+              )}
               <button onClick={handleDownload} className="action-btn download" title="Download">
                 <FaDownload />
               </button>
