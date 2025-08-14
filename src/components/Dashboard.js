@@ -32,13 +32,10 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
   const [previewWidth, setPreviewWidth] = useState(0); // px, measured for right panel
   const PREVIEW_MIN = 320;
   const PREVIEW_MAX_HARD = 720;
-  // Toggle to show/hide folders in the Files section
-  // Default ON for 'user' and 'admin', OFF for 'viewer'
-  const [showFolders, setShowFolders] = useState(userRole !== 'viewer');
-
-  useEffect(() => {
-    setShowFolders(userRole !== 'viewer');
-  }, [userRole]);
+  // Toggle to show/hide folders in the Files section (read-only users still need to see folders)
+  // Default ON for all roles so viewers can browse folder hierarchy.
+  const [showFolders, setShowFolders] = useState(true);
+  // (Removed effect that previously hid folders for viewer role.)
   // removed unused previewBackdropVisible state
 
   const handleLogout = async () => {
@@ -239,6 +236,40 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
             <PresetToggle preset={preset} setPreset={setPreset} />
             <StatusBar />
           </div>
+          {userRole === 'viewer' && (
+            <button
+              onClick={async () => {
+                try {
+                  // Prevent duplicate requests by checking localStorage flag quickly (optimistic)
+                  const flagKey = 'upgradeRequested:' + (user?.uid || '');
+                  if (localStorage.getItem(flagKey)) {
+                    alert('Upgrade request already submitted.');
+                    return;
+                  }
+                  const { doc, setDoc, collection, addDoc, serverTimestamp } = await import('firebase/firestore');
+                  // Firestore dynamic import not needed for doc/collection (already imported in other files) but ensure safety
+                  const { db } = await import('../firebase');
+                  // Add a request document
+                  await addDoc(collection(db, 'requests'), {
+                    type: 'role-upgrade',
+                    requestedBy: user.uid,
+                    requestedEmail: user.email,
+                    requestedAt: serverTimestamp(),
+                    status: 'pending',
+                    fromRole: 'viewer',
+                    desiredRole: 'user'
+                  });
+                  localStorage.setItem(flagKey, '1');
+                  alert('Upgrade request submitted. An admin will review it.');
+                } catch (e) {
+                  console.error('Upgrade request error', e);
+                  alert('Failed to submit upgrade request.');
+                }
+              }}
+              className="logout-btn"
+              style={{ background: '#2563eb' }}
+            >Request Upload Access</button>
+          )}
           <button onClick={() => setShowChangePw(true)} className="logout-btn">Change Password</button>
           {userRole === 'admin' && (
             <Link to="/admin" className="admin-link">Admin Panel</Link>

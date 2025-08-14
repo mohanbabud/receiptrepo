@@ -1,4 +1,3 @@
- 
 import React, { useState, useEffect, useRef } from 'react';
 import { ref, listAll, getMetadata, uploadBytes, deleteObject, getDownloadURL } from 'firebase/storage';
 import { storage, db, auth } from '../firebase';
@@ -38,8 +37,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   const [successMessage, setSuccessMessage] = useState(''); // Keeping this for context
   const [isError, setIsError] = useState(false); // Keeping this for context
   const [selection, setSelection] = useState({ type: 'background', target: null });
-  const fileInputRef = useRef(null);
-  const [uploading, setUploading] = useState(false);
+  // Removed unused fileInputRef and uploading state (was causing ESLint warnings)
   const [isDragging, setIsDragging] = useState(false);
   const [compact, setCompact] = useState(false);
   const [editingFileId, setEditingFileId] = useState(null);
@@ -66,6 +64,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   const loadTokenRef = useRef(0);
   // Cache for direct counts per folder to avoid repeated listAll; separate from folderCounts state
   const countsCacheRef = useRef(new Map()); // Map<string, { files: number, subfolders: number, ts: number }>
+  const [progress, setProgress] = useState({ active: false, value: 0, total: 0, label: '' });
   // Receive external events to refresh the current folder (e.g., after optimization/resync)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
@@ -834,7 +833,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   const uploadFilesArray = async (files) => {
     if (!files?.length) return;
     const safeFolder = normalizeFolderPath(currentPath || ROOT_PATH);
-    setUploading(true);
+  // uploading state removed
     try {
       for (const f of files) {
         const destPath = (safeFolder + f.name).replace(/^\/+/, '');
@@ -850,7 +849,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
       setSuccessMessage('Upload failed: ' + (e?.message || String(e)));
       setShowSuccessPopup(true);
     } finally {
-      setUploading(false);
+  // uploading state removed
     }
   };
 
@@ -1030,11 +1029,34 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
       return;
     }
     try {
+      console.log('[Rename] oldPath:', oldPath, 'newPath:', newPath);
       // Recursively move all contents and clean originals
       await copyFolder(oldPath, newPath, true, false, { silent: true });
-      // Attempt to remove any lingering placeholder at old root; ensure visibility at new root
-      try { await deleteObject(ref(storage, oldPath.replace(/^\/+/, '') + '.keep')); } catch (_) {}
-      try { await uploadBytes(ref(storage, newPath.replace(/^\/+/, '') + '.keep'), new Uint8Array()); } catch (_) {}
+      // Recursively delete all files and subfolders in old folder
+      async function recursiveDeleteFolder(path) {
+        const folderRef = ref(storage, path.replace(/^\/+/,''));
+        const result = await listAll(folderRef);
+        for (const item of result.items) {
+          try { await deleteObject(item); } catch (e) { /* ignore */ }
+        }
+        for (const prefix of result.prefixes) {
+          await recursiveDeleteFolder(prefix.fullPath);
+        }
+        // Try to delete .keep if not already deleted
+        try { await deleteObject(ref(storage, path.replace(/^\/+/,'') + '.keep')); } catch (e) { /* ignore */ }
+      }
+      try {
+        await recursiveDeleteFolder(oldPath);
+      } catch (e) {
+        console.warn('[Rename] Failed to fully delete old folder:', oldPath, e);
+      }
+      // Ensure new .keep file exists
+      try {
+        await uploadBytes(ref(storage, newPath.replace(/^\/+/,'') + '.keep'), new Uint8Array());
+        console.log('[Rename] Created new .keep:', newPath.replace(/^\/+/,'') + '.keep');
+      } catch (e) {
+        console.warn('[Rename] Failed to create new .keep:', newPath.replace(/^\/+/,'') + '.keep', e);
+      }
 
       // Update expanded folders and current path
       setExpandedFolders(prev => {
@@ -1046,7 +1068,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
       try {
         const cur = normalizeFolderPath(currentPath || ROOT_PATH);
         if (cur.startsWith(oldPath) && typeof onPathChange === 'function') {
-          const nextPath = (newPath + cur.substring(oldPath.length)).replace(/\/+/, '/');
+          const nextPath = (newPath + cur.substring(oldPath.length)).replace(/\/+/,'/');
           onPathChange(nextPath);
         }
       } catch {}
@@ -1056,7 +1078,18 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
       setIsError(false);
       setSuccessMessage('Folder renamed successfully!');
       setShowSuccessPopup(true);
-      await loadData();
+  // Aggressively clear all folder/file state and caches, then force reload
+  folderCacheRef.current.clear();
+  countsCacheRef.current.clear();
+  setStorageFolders(new Set());
+  setStorageFiles([]);
+  setSelection({ type: 'background', target: null });
+  setExpandedFolders(new Set([ROOT_PATH]));
+  setFileFilter('');
+  setFolderFilter('');
+  setFilePage(1);
+  await loadData();
+  console.log('[Rename] loadData called after rename.');
     } catch (error) {
       setIsError(true);
       setSuccessMessage('Error renaming folder: ' + (error.message || error.toString()));
@@ -1087,8 +1120,10 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   };
 
   const handleDeleteFile = async (fileItem) => {
+    setProgress({ active: true, value: 0, total: 1, label: 'Deleting file...' });
     try {
       await deleteObject(fileItem.ref);
+      setProgress({ active: true, value: 1, total: 1, label: 'Deleting file...' });
       setSuccessMessage('File deleted successfully!');
       setShowSuccessPopup(true);
       await loadData();
@@ -1097,15 +1132,18 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
       setSuccessMessage('Error deleting file');
       setShowSuccessPopup(true);
     }
+    setProgress({ active: false, value: 0, total: 0, label: '' });
   };
 
   // Destination-aware helpers used by modal
   const handleCopyFileTo = async (fileItem, destFolder, overwrite = false, opts = {}) => {
     const { silent = false } = opts || {};
     const dest = normalizeFolderPath(destFolder) + fileItem.name;
+    setProgress({ active: true, value: 0, total: 1, label: 'Copying file...' });
     try {
       const data = await import('firebase/storage').then(mod => mod.getBytes(fileItem.ref));
-      const destRef = ref(storage, dest.replace(/^\/+/, ''));
+      setProgress({ active: true, value: 0.5, total: 1, label: 'Copying file...' });
+  const destRef = ref(storage, dest.replace(/^\/+/, ''));
       // Overwrite check
       let exists = false;
       try { await getMetadata(destRef); exists = true; } catch (e) { exists = false; }
@@ -1115,9 +1153,11 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
           setSuccessMessage('Copy skipped: destination already has a file with this name.');
           setShowSuccessPopup(true);
         }
+        setProgress({ active: false, value: 0, total: 0, label: '' });
         return;
       }
       await uploadBytes(destRef, data);
+      setProgress({ active: true, value: 1, total: 1, label: 'Copying file...' });
       if (!silent) {
         setSuccessMessage('File copied');
         setIsError(false);
@@ -1134,14 +1174,17 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
         setShowSuccessPopup(true);
       }
     }
+    setProgress({ active: false, value: 0, total: 0, label: '' });
   };
 
   const handleMoveFileTo = async (fileItem, destFolder, overwrite = false, opts = {}) => {
     const { silent = false } = opts || {};
     const dest = normalizeFolderPath(destFolder) + fileItem.name;
+    setProgress({ active: true, value: 0, total: 1, label: 'Moving file...' });
     try {
       const data = await import('firebase/storage').then(mod => mod.getBytes(fileItem.ref));
-      const destRef = ref(storage, dest.replace(/^\/+/, ''));
+      setProgress({ active: true, value: 0.5, total: 1, label: 'Moving file...' });
+  const destRef = ref(storage, dest.replace(/^\/+/, ''));
       // Overwrite check
       let exists = false;
       try { await getMetadata(destRef); exists = true; } catch (e) { exists = false; }
@@ -1151,10 +1194,13 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
           setSuccessMessage('Move skipped: destination already has a file with this name.');
           setShowSuccessPopup(true);
         }
+        setProgress({ active: false, value: 0, total: 0, label: '' });
         return;
       }
       await uploadBytes(destRef, data);
+      setProgress({ active: true, value: 0.8, total: 1, label: 'Moving file...' });
       await deleteObject(fileItem.ref);
+      setProgress({ active: true, value: 1, total: 1, label: 'Moving file...' });
       if (!silent) {
         setSuccessMessage('File moved');
         setIsError(false);
@@ -1171,6 +1217,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
         setShowSuccessPopup(true);
       }
     }
+    setProgress({ active: false, value: 0, total: 0, label: '' });
   };
 
   const getParentFolderPath = (fileItem) => normalizeFolderPath(fileItem?.path || ROOT_PATH);
@@ -1185,16 +1232,29 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
       return;
     }
     try {
-      let overwriteApproved = overwriteAll ? true : null; // null = not asked (legacy), true = overwrite all, false = skip conflicts
+      let overwriteApproved = overwriteAll ? true : null;
+      // Count total files/folders for progress
+      let totalCount = 0;
+      const countItems = async (fromPath) => {
+        const fromRef = ref(storage, fromPath.replace(/^\/+/,''));
+        const result = await listAll(fromRef);
+        totalCount += result.items.length;
+        for (const prefix of result.prefixes) {
+          await countItems(prefix.fullPath);
+        }
+      };
+      await countItems(src);
+  setProgress({ active: true, value: 0, total: totalCount, label: removeOriginal ? 'Moving folder...' : 'Copying folder...' });
+      let processedCount = 0;
       const walk = async (fromPath, toPath) => {
-        const fromRef = ref(storage, fromPath.replace(/^\/+/, ''));
-        const baseFrom = fromPath.replace(/^\/+/, '');
+        const fromRef = ref(storage, fromPath.replace(/^\/+/,''));
+        const baseFrom = fromPath.replace(/^\/+/,'')
         const result = await listAll(fromRef);
         // Copy files
         for (const item of result.items) {
           const bytes = await import('firebase/storage').then(mod => mod.getBytes(item));
-          const rel = item.fullPath.substring(baseFrom.length).replace(/^\/+/, '');
-          const toFile = (toPath.replace(/^\/+/, '') + rel).replace(/^\/+/, '');
+          const rel = item.fullPath.substring(baseFrom.length).replace(/^\/+/,'')
+          const toFile = (toPath.replace(/^\/+/,'') + rel).replace(/^\/+/,'')
           const toRef = ref(storage, toFile);
           // Overwrite check per file
           let exists = false;
@@ -1210,18 +1270,20 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
           if (removeOriginal) {
             await deleteObject(item);
           }
+          processedCount++;
+      setProgress(prev => ({ ...prev, value: processedCount }));
         }
         // Recurse folders
         for (const prefix of result.prefixes) {
           const relFolder = prefix.fullPath.substring(baseFrom.length);
           await walk(prefix.fullPath, (dst + relFolder).replace(/\/+/g, '/'));
           if (removeOriginal) {
-            // Try to delete any .keep if exists
             try { await deleteObject(ref(storage, prefix.fullPath + '/.keep')); } catch (e) {}
           }
         }
       };
       await walk(src, dst);
+      setProgress({ active: false, value: 0, total: 0, label: '' });
       if (!silent) {
         setSuccessMessage(removeOriginal ? 'Folder moved successfully!' : 'Folder copied successfully!');
         setIsError(false);
@@ -1229,6 +1291,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
         await loadData();
       }
     } catch (e) {
+      setProgress({ active: false, value: 0, total: 0, label: '' });
       if (silent) {
         // Propagate to caller so bulk flow can count failures without per-item popups
         throw e;
@@ -1286,6 +1349,8 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
           }
         }
       }
+      // Try to delete .keep if not already deleted
+      try { await deleteObject(ref(storage, base.replace(/^\/+/,'') + '.keep')); } catch (e) { /* ignore */ }
 
       // Recurse into subfolders
       for (const prefix of result.prefixes) {
@@ -1311,7 +1376,12 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
           if (parent && typeof onPathChange === 'function') onPathChange(parent || ROOT_PATH);
         }
       } catch {}
-      loadData();
+  folderCacheRef.current.clear();
+  countsCacheRef.current.clear();
+  setStorageFolders(new Set());
+  setStorageFiles([]);
+  setSelection({ type: 'background', target: null });
+  await loadData();
     } catch (error) {
       setIsError(true);
       setSuccessMessage('Error deleting folder');
@@ -1322,7 +1392,12 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
 
   // Create new folder in Firebase Storage
   const handleCreateFolder = async () => {
-    if (!newFolderName.trim()) return;
+    if (!newFolderName.trim()) {
+      setIsError(true);
+      setSuccessMessage('Folder name cannot be empty.');
+      setShowSuccessPopup(true);
+      return;
+    }
     let basePath = newFolderBasePath || normalizeFolderPath(currentPath || ROOT_PATH);
     if (!basePath.endsWith('/')) basePath += '/';
     let scopedBase = basePath;
@@ -1337,12 +1412,16 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
       setNewFolderName('');
       setNewFolderBasePath(null);
       setSuccessMessage('Folder created successfully!');
+      setIsError(false);
       setShowSuccessPopup(true);
       loadData();
     } catch (error) {
       setIsError(true);
-      setSuccessMessage('Error creating folder');
+      setSuccessMessage('Error creating folder: ' + (error.message || error.toString()));
       setShowSuccessPopup(true);
+      setNewFolderName('');
+      setNewFolderBasePath(null);
+      setShowNewFolderInput(true);
       console.error('Error creating folder:', error);
     }
   };
@@ -1378,7 +1457,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
           } catch (_) {}
         }
         for (const prefix of res.prefixes) {
-      const relFolder = prefix.fullPath.substring(baseNoSlash.length).replace(/^\/+/, '');
+      const relFolder = prefix.fullPath.substring(baseNoSlash.length).replace(/^\/+|\/+$/g, '');
           await addFolder(prefix.fullPath, zipFolder.folder(relFolder));
         }
       };
@@ -1609,7 +1688,6 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     );
   };
 
-
   // Render only direct subfolders for a given path (no recursive tree)
   const renderSubfoldersOnly = (path) => {
     const safe = normalizeFolderPath(path || ROOT_PATH);
@@ -1619,6 +1697,9 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
         const relativePath = folder.substring(safe.length);
         const isDirectChild = folder.startsWith(safe) && folder !== safe && relativePath.split('/').filter(p => p).length === 1;
         if (!isDirectChild) return false;
+        // Filter out empty folders (no files, no subfolders)
+        const directCounts = folderCounts[folder];
+        if (directCounts && directCounts.files === 0 && directCounts.subfolders === 0) return false;
         if (!folderFilter) return true;
         const name = folder.substring(safe.length).replace('/', '').toLowerCase();
         return name.includes(folderFilter.toLowerCase());
@@ -1750,9 +1831,26 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
 
   if (loading) return <div className="loading">Loading files...</div>;
 
+  function renderProgressBar() {
+    if (!progress.active || progress.total === 0) return null;
+    const percent = Math.round((progress.value / progress.total) * 100);
+    return (
+      <div className="folder-progress-modal-overlay">
+        <div className="folder-progress-modal">
+          <div className="folder-progress-modal-title">{progress.label}</div>
+          <div className="folder-progress-modal-bar">
+            <div className="folder-progress-modal-bar-fill" style={{ width: `${percent}%` }} />
+          </div>
+          <div className="folder-progress-modal-label">{progress.value} / {progress.total}</div>
+        </div>
+      </div>
+    );
+  }
+
   return (
-  <div className={`folder-tree ${compact ? 'compact' : ''}`} tabIndex={0} onKeyDown={handleKeyDown}>
-  <div className="tree-header" onContextMenu={e => handleContextMenu(e, currentPath, 'background')}>
+  <div className={`folder-tree${compact ? ' compact' : ''}`}> 
+  {renderProgressBar()}
+    <div className="tree-header" onContextMenu={e => handleContextMenu(e, currentPath, 'background')}>
         <div className="breadcrumb-path">
           <button
             type="button"
@@ -1797,45 +1895,45 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
         </div>
         <div className="tree-controls">
           {!filesOnly && (
-            <>
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+              {userRole !== 'viewer' && (
+                <>
+                  <button
+                    type="button"
+                    title="Create new folder"
+                    onClick={() => {
+                      try {
+                        const base = normalizeFolderPath(currentPath || ROOT_PATH);
+                        setNewFolderBasePath(base);
+                      } catch {}
+                      setShowNewFolderInput(true);
+                    }}
+                  >
+                    📁 New Folder <span className="plus-icon">+</span>
+                  </button>
+                  {showNewFolderInput && (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, marginLeft: 8 }}>
+                      <input
+                        type="text"
+                        value={newFolderName}
+                        onChange={e => setNewFolderName(e.target.value)}
+                        placeholder={`New folder name`}
+                        autoFocus
+                        style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid #ccc' }}
+                      />
+                      <button onClick={handleCreateFolder}>Create</button>
+                      <button onClick={() => { setShowNewFolderInput(false); setNewFolderName(''); setNewFolderBasePath(null); }}>Cancel</button>
+                    </span>
+                  )}
+                </>
+              )}
               <button
                 title={`Folder view: ${folderView === 'cards' ? 'Cards' : 'List'}`}
                 onClick={() => setFolderView(v => (v === 'cards' ? 'list' : 'cards'))}
-                style={{ marginRight: 8 }}
               >
                 Folder View: {folderView === 'cards' ? 'Cards' : 'List'}
               </button>
-              {userRole !== 'viewer' && (
-                <button
-                  type="button"
-                  title="Create new folder"
-                  onClick={() => {
-                    try {
-                      const base = normalizeFolderPath(currentPath || ROOT_PATH);
-                      setNewFolderBasePath(base);
-                    } catch {}
-                    setShowNewFolderInput(true);
-                  }}
-                  style={{ marginRight: 8 }}
-                >
-                  📁 New Folder
-                </button>
-              )}
-            </>
-          )}
-          {showNewFolderInput && (
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, marginLeft: 8 }}>
-              <input
-                type="text"
-                value={newFolderName}
-                onChange={e => setNewFolderName(e.target.value)}
-                placeholder={`New folder name`}
-                autoFocus
-                style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid #ccc' }}
-              />
-              <button onClick={handleCreateFolder}>Create</button>
-              <button onClick={() => { setShowNewFolderInput(false); setNewFolderName(''); setNewFolderBasePath(null); }}>Cancel</button>
-            </span>
+            </div>
           )}
           <input
             type="text"
@@ -1882,24 +1980,26 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
           >
             {fileSort === 'name' ? (fileSortDir === 'asc' ? 'A→Z' : 'Z→A') : (fileSortDir === 'asc' ? '↑' : '↓')}
           </button>
-          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: 12, fontSize: 13 }} title="Include files from nested subfolders in this view">
-            <input type="checkbox" checked={includeNestedFiles} onChange={(e) => setIncludeNestedFiles(e.target.checked)} />
-            Include nested files
-          </label>
-          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: 12, fontSize: 13 }} title="Compact list density">
-            <input type="checkbox" checked={compact} onChange={(e) => setCompact(e.target.checked)} />
-            Compact
-          </label>
+          <div className="tree-controls-right">
+            {/* Removed 'Include nested files' toggle as nested files are always shown */}
+            <label className="toggle-label" title="Compact list density">
+              <input type="checkbox" checked={compact} onChange={(e) => setCompact(e.target.checked)} />
+              Compact
+            </label>
+          </div>
         </div>
       </div>
       {/* Lightweight stats for the current folder to aid clarity */}
       {/* Manual refresh control */}
       <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '0 4px' }}>
-        <button title="Refresh current folder" onClick={() => { try {
-          const safe = normalizeFolderPath(currentPath || ROOT_PATH);
-          folderCacheRef.current.delete(safe);
-          countsCacheRef.current.delete(safe);
-        } catch (_) {} finally { loadData(); } }}>Refresh</button>
+          <button className="refresh-btn" title="Refresh current folder" onClick={() => { try {
+            const safe = normalizeFolderPath(currentPath || ROOT_PATH);
+            folderCacheRef.current.delete(safe);
+            countsCacheRef.current.delete(safe);
+            setStorageFolders(new Set());
+            setStorageFiles([]);
+            setSelection({ type: 'background', target: null });
+          } catch (_) {} finally { loadData(); } }}>Refresh</button>
       </div>
       
       
@@ -1927,7 +2027,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
           {contextMenu.type === 'folder' && (
             <>
               <div className="context-menu-title" style={{ padding: '8px 16px', fontWeight: 'bold', color: '#444', borderBottom: '1px solid #eee' }}>Folder Actions</div>
-              <div className="context-menu-item" role="menuitem" tabIndex={0} style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-folder')} onKeyDown={(e)=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); handleMenuAction('create-folder'); }}}>📁 New Subfolder</div>
+              <div className="context-menu-item" role="menuitem" tabIndex={0} style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-folder')} onKeyDown={(e)=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); handleMenuAction('create-folder'); }}}>📁 New Subfolder <span className="plus-icon">+</span></div>
               <div className="context-menu-item" role="menuitem" tabIndex={0} style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-file')} onKeyDown={(e)=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); handleMenuAction('create-file'); }}}>📄 New File</div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('rename')}>✏️ Rename</div>
               {(userRole === 'admin') ? (
@@ -1947,7 +2047,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
             <>
               <div className="context-menu-title" style={{ padding: '8px 16px', fontWeight: 'bold', color: '#444', borderBottom: '1px solid #eee' }}>File Actions</div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-file')}>📄 New File</div>
-              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-folder')}>📁 New Folder</div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-folder')}>📁 New Folder <span className="plus-icon">+</span></div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('rename')}>✏️ Rename</div>
               {(userRole === 'admin') ? (
                 <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer', color: '#d9534f' }} onClick={() => handleMenuAction('delete')}>🗑️ Delete</div>
@@ -1963,7 +2063,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
           {contextMenu.type === 'background' && (
             <>
               <div className="context-menu-title" style={{ padding: '8px 16px', fontWeight: 'bold', color: '#444', borderBottom: '1px solid #eee' }}>Here</div>
-              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-folder')}>📁 New Folder</div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-folder')}>📁 New Folder <span className="plus-icon">+</span></div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-file')}>📄 New File</div>
             </>
           )}
