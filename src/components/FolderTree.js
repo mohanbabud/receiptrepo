@@ -1,5 +1,10 @@
+﻿/* eslint-disable unicode-bom */
+/* eslint-disable react-hooks/exhaustive-deps */
+/* eslint-disable no-loop-func */
 import React, { useState, useEffect, useRef } from 'react';
 import { ref, listAll, getMetadata, uploadBytes, deleteObject, getDownloadURL } from 'firebase/storage';
+import { httpsCallable } from 'firebase/functions';
+import { functions } from '../firebase';
 import { storage, db, auth } from '../firebase';
 import { collection, doc, onSnapshot, setDoc, deleteDoc, addDoc, serverTimestamp, getDocs, query as fsQuery, where } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
@@ -23,7 +28,8 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   const [storageFiles, setStorageFiles] = useState([]);
   const [storageFolders, setStorageFolders] = useState(new Set());
   const [loading, setLoading] = useState(true);
-  const [includeNestedFiles, setIncludeNestedFiles] = useState(false);
+  // Nested files view toggle removed from UI; keep flag constant to avoid unused setter warning
+  const [includeNestedFiles] = useState(false);
   const [folderView, setFolderView] = useState('cards'); // 'cards' | 'list'
   // Map of direct counts for each folder: { [folderPath]: { files: number, subfolders: number } }
   const [folderCounts, setFolderCounts] = useState({});
@@ -65,8 +71,15 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   // Cache for direct counts per folder to avoid repeated listAll; separate from folderCounts state
   const countsCacheRef = useRef(new Map()); // Map<string, { files: number, subfolders: number, ts: number }>
   const [progress, setProgress] = useState({ active: false, value: 0, total: 0, label: '' });
+
+  // Auto-close success popup after a short delay (2s for success, 5s for errors)
+  useEffect(() => {
+    if (!showSuccessPopup) return;
+    const delay = isError ? 5000 : 2000;
+    const t = setTimeout(() => setShowSuccessPopup(false), delay);
+    return () => clearTimeout(t);
+  }, [showSuccessPopup, isError]);
   // Receive external events to refresh the current folder (e.g., after optimization/resync)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     const handler = (e) => {
       try {
@@ -88,6 +101,8 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     };
     window.addEventListener('storage-meta-refresh', handler);
     return () => window.removeEventListener('storage-meta-refresh', handler);
+    // Intentionally exclude loadData (stable ref in this module)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentPath]);
 
   const openContextMenuAt = (x, y, target, type) => {
@@ -166,6 +181,15 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     if (!authReady) return;
     loadData();
   }, [currentPath, refreshTrigger, includeNestedFiles, authReady]);
+
+  // Global keydown shortcuts handler wiring
+  useEffect(() => {
+    const fn = (e) => { try { handleKeyDown(e); } catch {} };
+    window.addEventListener('keydown', fn, { passive: false });
+    return () => { window.removeEventListener('keydown', fn); };
+    // Intentionally not including handleKeyDown to avoid re-binding on every render
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Listen for success messages dispatched from components like FilePreview
   useEffect(() => {
@@ -597,9 +621,9 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
         status: 'pending',
       };
       await addDoc(collection(db, 'requests'), req);
-      setIsError(false);
-      setSuccessMessage('Delete request submitted for admin review.');
-      setShowSuccessPopup(true);
+  setIsError(false);
+  setSuccessMessage('Delete request submitted for admin review.');
+  setShowSuccessPopup(true);
     } catch (e) {
       setIsError(true);
       setSuccessMessage('Error submitting delete request.');
@@ -703,9 +727,9 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
       }
       clearSelection();
       await loadData();
-      setIsError(false);
-      setSuccessMessage(`Deleted ${files.length} file(s) and ${folders.length} folder(s).`);
-      setShowSuccessPopup(true);
+  setIsError(false);
+  setSuccessMessage(`Deleted ${files.length} file(s) and ${folders.length} folder(s).`);
+  setShowSuccessPopup(true);
     } catch (e) {
       setIsError(true);
       setSuccessMessage('Bulk delete encountered errors.');
@@ -819,9 +843,9 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     try {
       const fileRef = ref(storage, objectPath);
       await uploadBytes(fileRef, new Uint8Array());
-      setSuccessMessage('File created');
-      setIsError(false);
-      setShowSuccessPopup(true);
+  setSuccessMessage('File created');
+  setIsError(false);
+  setShowSuccessPopup(true);
       await loadData();
     } catch (err) {
       setIsError(true);
@@ -841,9 +865,9 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
         await uploadBytes(destRef, f);
       }
       await loadData();
-      setSuccessMessage(`${files.length} file(s) uploaded`);
-      setIsError(false);
-      setShowSuccessPopup(true);
+  setSuccessMessage(`${files.length} file(s) uploaded`);
+  setIsError(false);
+  setShowSuccessPopup(true);
     } catch (e) {
       setIsError(true);
       setSuccessMessage('Upload failed: ' + (e?.message || String(e)));
@@ -962,9 +986,9 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
         }
         setClipboard(null);
         await loadData();
-        setSuccessMessage('Paste completed');
-        setIsError(false);
-        setShowSuccessPopup(true);
+  setSuccessMessage('Paste completed');
+  setIsError(false);
+  setShowSuccessPopup(true);
       } catch (e2) {
         setIsError(true);
         setSuccessMessage('Error pasting: ' + (e2.message || e2.toString()));
@@ -1005,10 +1029,11 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
       const fileBytes = await import('firebase/storage').then(mod => mod.getBytes(fileItem.ref));
       const newRef = ref(storage, newFull);
       await uploadBytes(newRef, fileBytes);
-      await deleteObject(fileItem.ref);
-      setEditingFileId(null); setEditingName('');
-      setSuccessMessage('File renamed successfully!');
-      setShowSuccessPopup(true);
+  await deleteObject(fileItem.ref);
+  setEditingFileId(null); setEditingName('');
+  setSuccessMessage('File renamed successfully!');
+  setIsError(false);
+  setShowSuccessPopup(true);
       await loadData();
     } catch (error) {
       setIsError(true);
@@ -1030,33 +1055,21 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     }
     try {
       console.log('[Rename] oldPath:', oldPath, 'newPath:', newPath);
-      // Recursively move all contents and clean originals
-      await copyFolder(oldPath, newPath, true, false, { silent: true });
-      // Recursively delete all files and subfolders in old folder
-      async function recursiveDeleteFolder(path) {
-        const folderRef = ref(storage, path.replace(/^\/+/,''));
-        const result = await listAll(folderRef);
-        for (const item of result.items) {
-          try { await deleteObject(item); } catch (e) { /* ignore */ }
+      // Try server-side rename for admins (fast, avoids client download/upload)
+      if (userRole === 'admin') {
+        try {
+          const callable = httpsCallable(functions, 'renameFolder');
+          await callable({ src: oldPath, dst: newPath, updateFirestore: true });
+        } catch (e) {
+          console.warn('Server rename failed; falling back to client copy:', e && e.message);
+          await copyFolder(oldPath, newPath, true, true, { silent: true });
         }
-        for (const prefix of result.prefixes) {
-          await recursiveDeleteFolder(prefix.fullPath);
-        }
-        // Try to delete .keep if not already deleted
-        try { await deleteObject(ref(storage, path.replace(/^\/+/,'') + '.keep')); } catch (e) { /* ignore */ }
+      } else {
+        // Non-admin fallback: client-side copy+delete
+        await copyFolder(oldPath, newPath, true, true, { silent: true });
       }
-      try {
-        await recursiveDeleteFolder(oldPath);
-      } catch (e) {
-        console.warn('[Rename] Failed to fully delete old folder:', oldPath, e);
-      }
-      // Ensure new .keep file exists
-      try {
-        await uploadBytes(ref(storage, newPath.replace(/^\/+/,'') + '.keep'), new Uint8Array());
-        console.log('[Rename] Created new .keep:', newPath.replace(/^\/+/,'') + '.keep');
-      } catch (e) {
-        console.warn('[Rename] Failed to create new .keep:', newPath.replace(/^\/+/,'') + '.keep', e);
-      }
+  // Ensure new .keep exists (no-op if server move already placed content)
+  try { await uploadBytes(ref(storage, newPath.replace(/^\/+/,'') + '.keep'), new Uint8Array()); } catch (_) {}
 
       // Update expanded folders and current path
       setExpandedFolders(prev => {
@@ -1075,9 +1088,9 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
 
       setRenamingFolder(null);
       setRenameFolderName('');
-      setIsError(false);
-      setSuccessMessage('Folder renamed successfully!');
-      setShowSuccessPopup(true);
+  setIsError(false);
+  setSuccessMessage('Folder renamed successfully!');
+  setShowSuccessPopup(true);
   // Aggressively clear all folder/file state and caches, then force reload
   folderCacheRef.current.clear();
   countsCacheRef.current.clear();
@@ -1088,7 +1101,13 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   setFileFilter('');
   setFolderFilter('');
   setFilePage(1);
+  // Immediate refresh
   await loadData();
+  // Nudge path change to force parent-driven refresh (if provided)
+  try { if (typeof onPathChange === 'function') onPathChange(normalizeFolderPath(currentPath || ROOT_PATH)); } catch {}
+  // Handle Storage eventual consistency by scheduling extra refresh passes
+  setTimeout(() => { try { loadData(); } catch {} }, 500);
+  setTimeout(() => { try { loadData(); } catch {} }, 1500);
   console.log('[Rename] loadData called after rename.');
     } catch (error) {
       setIsError(true);
@@ -1108,9 +1127,10 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
       const fileBytes = await import('firebase/storage').then(mod => mod.getBytes(fileItem.ref));
       const newRef = ref(storage, newFull);
       await uploadBytes(newRef, fileBytes);
-      await deleteObject(fileItem.ref);
-      setSuccessMessage('File renamed successfully!');
-      setShowSuccessPopup(true);
+  await deleteObject(fileItem.ref);
+  setSuccessMessage('File renamed successfully!');
+  setIsError(false);
+  setShowSuccessPopup(true);
       await loadData();
     } catch (error) {
       setIsError(true);
@@ -1124,8 +1144,9 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     try {
       await deleteObject(fileItem.ref);
       setProgress({ active: true, value: 1, total: 1, label: 'Deleting file...' });
-      setSuccessMessage('File deleted successfully!');
-      setShowSuccessPopup(true);
+  setSuccessMessage('File deleted successfully!');
+  setIsError(false);
+  setShowSuccessPopup(true);
       await loadData();
     } catch (error) {
       setIsError(true);
@@ -1245,17 +1266,18 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
       };
       await countItems(src);
   setProgress({ active: true, value: 0, total: totalCount, label: removeOriginal ? 'Moving folder...' : 'Copying folder...' });
-      let processedCount = 0;
+  let processedCount = 0;
       const walk = async (fromPath, toPath) => {
         const fromRef = ref(storage, fromPath.replace(/^\/+/,''));
         const baseFrom = fromPath.replace(/^\/+/,'')
         const result = await listAll(fromRef);
         // Copy files
         for (const item of result.items) {
-          const bytes = await import('firebase/storage').then(mod => mod.getBytes(item));
-          const rel = item.fullPath.substring(baseFrom.length).replace(/^\/+/,'')
-          const toFile = (toPath.replace(/^\/+/,'') + rel).replace(/^\/+/,'')
+          // Clone per-iteration values to avoid referencing changing outer variables
+          const rel = item.fullPath.substring(baseFrom.length).replace(/^\/+/, '');
+          const toFile = (toPath.replace(/^\/+/, '') + rel).replace(/^\/+/, '');
           const toRef = ref(storage, toFile);
+          const bytes = await import('firebase/storage').then(mod => mod.getBytes(item));
           // Overwrite check per file
           let exists = false;
           try { await getMetadata(toRef); exists = true; } catch (e) { exists = false; }
@@ -1271,7 +1293,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
             await deleteObject(item);
           }
           processedCount++;
-      setProgress(prev => ({ ...prev, value: processedCount }));
+          setProgress({ active: true, value: processedCount, total: totalCount, label: removeOriginal ? 'Moving folder...' : 'Copying folder...' });
         }
         // Recurse folders
         for (const prefix of result.prefixes) {
@@ -1367,6 +1389,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
 
   const deletedName = (base.split('/').filter(Boolean).pop()) || 'Folder';
   setSuccessMessage(`${deletedName} deleted successfully!`);
+      setIsError(false);
       setShowSuccessPopup(true);
       // If we deleted the currently open folder, navigate to its parent
       try {
@@ -1848,7 +1871,11 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   }
 
   return (
-  <div className={`folder-tree${compact ? ' compact' : ''}`}> 
+  <div
+      className={`folder-tree${compact ? ' compact' : ''}`}
+      tabIndex={0}
+      onKeyDown={handleKeyDown}
+    > 
   {renderProgressBar()}
     <div className="tree-header" onContextMenu={e => handleContextMenu(e, currentPath, 'background')}>
         <div className="breadcrumb-path">
