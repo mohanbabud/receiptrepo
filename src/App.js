@@ -4,6 +4,7 @@ import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
 import { auth, db } from './firebase';
 import Login from './components/Login';
+import ResetPassword from './components/ResetPassword';
 import Dashboard from './components/Dashboard';
 import AdminPanel from './components/AdminPanel';
 import TreeViewPage from './components/TreeViewPage';
@@ -167,6 +168,7 @@ function App() {
       <Router>
         <Routes>
           <Route path="/login" element={!user ? <Login /> : <Navigate to="/dashboard" />} />
+          <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="/dashboard" element={user ? <Dashboard user={user} userRole={userRole} theme={theme} setTheme={setTheme} accent={accent} setAccent={setAccent} preset={preset} setPreset={setPreset} /> : <Navigate to="/login" />} />
           <Route path="/admin" element={user && userRole === 'admin' ? <AdminPanel user={user} /> : <Navigate to="/dashboard" />} />
           <Route path="/tree-view" element={user ? <TreeViewPage user={user} userRole={userRole} /> : <Navigate to="/login" />} />
