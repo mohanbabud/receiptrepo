@@ -179,6 +179,14 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
         try {
           const msg = `"${file.name}" deleted successfully!`;
           window.dispatchEvent(new CustomEvent('file-action-success', { detail: { message: msg } }));
+          // Also broadcast a storage-meta-refresh for the parent folder so any open views reload
+          const parent = (() => {
+            const fp = (details?.fullPath || file.fullPath || file?.ref?.fullPath || '').replace(/^\/+/, '');
+            if (!fp || fp === 'files' || fp === 'files/') return 'files/';
+            const parentPath = fp.substring(0, fp.lastIndexOf('/') + 1);
+            return parentPath || 'files/';
+          })();
+          window.dispatchEvent(new CustomEvent('storage-meta-refresh', { detail: { prefix: parent } }));
         } catch (_) {}
         onFileAction();
         onClose();

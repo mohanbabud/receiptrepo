@@ -246,7 +246,7 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
                     alert('Upgrade request already submitted.');
                     return;
                   }
-                  const { doc, setDoc, collection, addDoc, serverTimestamp } = await import('firebase/firestore');
+                  const { collection, addDoc, serverTimestamp } = await import('firebase/firestore');
                   // Firestore dynamic import not needed for doc/collection (already imported in other files) but ensure safety
                   const { db } = await import('../firebase');
                   // Add a request document
