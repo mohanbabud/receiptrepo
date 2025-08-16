@@ -24,6 +24,24 @@
   font-weight: 600;
 }
 
+.error {
+  background: var(--error-light);
+  color: var(--error-color);
+  border: 1px solid var(--error-color);
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  margin-bottom: 0.75rem;
+}
+
+.info {
+  background: var(--primary-light);
+  color: var(--primary-dark);
+  border: 1px solid var(--primary-color);
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  margin-bottom: 0.75rem;
+}
+
 /* OAuth UI removed */
 
 .form-group {
@@ -49,6 +67,45 @@
 .form-group input:focus {
   outline: none;
   border-color: var(--primary-color);
+}
+
+.password-field {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.toggle-visibility {
+  background: none;
+  border: 1px solid var(--gray-200);
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+
+.toggle-visibility:hover {
+  background: var(--gray-100);
+}
+
+.form-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 0.25rem;
+}
+
+.forgot-link {
+  background: none;
+  border: none;
+  color: var(--primary-color);
+  cursor: pointer;
+  text-decoration: underline;
+  font-size: 0.9rem;
+}
+
+.forgot-link:hover {
+  color: var(--primary-dark);
 }
 
 .login-btn {
