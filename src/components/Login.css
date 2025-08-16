@@ -24,61 +24,7 @@
   font-weight: 600;
 }
 
-.google-btn {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  padding: 0.75rem;
-  background: #ffffff;
-  color: #111827;
-  border: 2px solid #e5e7eb;
-  border-radius: 8px;
-  font-size: 1rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.2s ease, transform 0.2s ease;
-}
-
-.google-btn:hover:not(:disabled) {
-  background: #f9fafb;
-  transform: translateY(-1px);
-}
-
-.google-btn:disabled {
-  opacity: 0.7;
-  cursor: not-allowed;
-}
-
-.g-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  background: #fff;
-  border-radius: 50%;
-  border: 1px solid #e5e7eb;
-  font-weight: 700;
-  color: #ea4335;
-}
-
-.oauth-separator {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  color: #6b7280;
-  font-size: 0.85rem;
-  margin: 1rem 0;
-}
-.oauth-separator::before,
-.oauth-separator::after {
-  content: '';
-  flex: 1;
-  height: 1px;
-  background: #e5e7eb;
-}
+/* OAuth UI removed */
 
 .form-group {
   margin-bottom: 1rem;
