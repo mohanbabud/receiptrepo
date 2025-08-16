@@ -315,7 +315,6 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
       const fileList = [];
       const counts = {}; // will populate direct counts per folder
       myToken = ++loadTokenRef.current;
-
       if (!includeNestedFiles) {
         // Shallow listing: only direct subfolders and files
         // Use cached result if fresh (<= 30s)
@@ -386,9 +385,19 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
       }
 
   // If another load started while awaiting, ignore stale results
-  if (myToken !== loadTokenRef.current) return;
-	setStorageFolders(prev => new Set([...(prev || []), ...folderSet]));
-	setStorageFiles(fileList);
+      if (myToken !== loadTokenRef.current) return;
+      // Replace folder entries under the current path to avoid stale names in cards view
+      setStorageFolders(prev => {
+        const next = new Set([...(prev || [])]);
+        try {
+          for (const fp of Array.from(next)) {
+            if (fp.startsWith(safe)) next.delete(fp);
+          }
+        } catch (_) {}
+        for (const fp of folderSet) next.add(fp);
+        return next;
+      });
+      setStorageFiles(fileList);
       setFolderCounts(counts);
 
       // After load, if any files are missing size, fill sizes in the background for a limited batch.
@@ -1121,6 +1130,13 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   setFileFilter('');
   setFolderFilter('');
   setFilePage(1);
+  // Notify parent views (e.g., Dashboard list for the parent folder) to refresh
+  try {
+    const parentOfOld = oldPath.replace(/[^/]+\/$/, '');
+    const parentOfNew = newPath.replace(/[^/]+\/$/, '');
+    notifyFolderChanged(parentOfOld);
+    if (parentOfNew !== parentOfOld) notifyFolderChanged(parentOfNew);
+  } catch (_) {}
   // Immediate refresh
   await loadData();
   // Nudge path change to force parent-driven refresh (if provided)
@@ -1347,6 +1363,15 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
         setSuccessMessage(removeOriginal ? 'Folder moved successfully!' : 'Folder copied successfully!');
         setIsError(false);
         setShowSuccessPopup(true);
+        // Invalidate and broadcast refresh for both source and destination parent folders
+        try {
+          const srcParent = src.replace(/[^/]+\/$/, '');
+          const dstParent = dst.replace(/[^/]+\/$/, '');
+          invalidateFolderCaches(srcParent);
+          invalidateFolderCaches(dstParent);
+          notifyFolderChanged(srcParent);
+          notifyFolderChanged(dstParent);
+        } catch (_) {}
         await loadData();
       }
     } catch (e) {
