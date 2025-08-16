@@ -834,6 +834,22 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     return p.replace(/\/+/g, '/');
   };
 
+  // Invalidate caches for a folder and optionally notify other views to refresh
+  const invalidateFolderCaches = (folderPath) => {
+    try {
+      const safe = normalizeFolderPath(folderPath || currentPath || ROOT_PATH);
+      folderCacheRef.current.delete(safe);
+      countsCacheRef.current.delete(safe);
+    } catch (_) {}
+  };
+  const notifyFolderChanged = (folderPath) => {
+    try {
+      const safe = normalizeFolderPath(folderPath || currentPath || ROOT_PATH);
+      const normalized = safe.replace(/^\/+/, '').replace(/\\/g, '/');
+      window.dispatchEvent(new CustomEvent('storage-meta-refresh', { detail: { prefix: normalized } }));
+    } catch (_) {}
+  };
+
   const handleNewFile = async (folderPath) => {
     if (userRole === 'viewer') { alert('You do not have permission to create files.'); return; }
     const name = prompt('Enter new file name (e.g., note.txt):');
@@ -1034,6 +1050,10 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   setSuccessMessage('File renamed successfully!');
   setIsError(false);
   setShowSuccessPopup(true);
+  // Invalidate parent folder cache and notify listeners
+  const parent = getParentFolderPath({ path: '/' + (oldFull.substring(0, oldFull.lastIndexOf('/') + 1)) });
+  invalidateFolderCaches(parent);
+  notifyFolderChanged(parent);
       await loadData();
     } catch (error) {
       setIsError(true);
@@ -1131,6 +1151,9 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   setSuccessMessage('File renamed successfully!');
   setIsError(false);
   setShowSuccessPopup(true);
+  const parent = getParentFolderPath({ path: '/' + (oldFull.substring(0, oldFull.lastIndexOf('/') + 1)) });
+  invalidateFolderCaches(parent);
+  notifyFolderChanged(parent);
       await loadData();
     } catch (error) {
       setIsError(true);
@@ -1147,6 +1170,9 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   setSuccessMessage('File deleted successfully!');
   setIsError(false);
   setShowSuccessPopup(true);
+  const parent = getParentFolderPath(fileItem);
+  invalidateFolderCaches(parent);
+  notifyFolderChanged(parent);
       await loadData();
     } catch (error) {
       setIsError(true);
@@ -1183,6 +1209,10 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
         setSuccessMessage('File copied');
         setIsError(false);
         setShowSuccessPopup(true);
+  // Invalidate destination cache and notify
+  const destSafe = normalizeFolderPath(destFolder);
+  invalidateFolderCaches(destSafe);
+  notifyFolderChanged(destSafe);
         await loadData();
       }
     } catch (e) {
@@ -1226,6 +1256,13 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
         setSuccessMessage('File moved');
         setIsError(false);
         setShowSuccessPopup(true);
+  // Invalidate both source and destination caches and notify
+  const destSafe = normalizeFolderPath(destFolder);
+  const srcSafe = getParentFolderPath(fileItem);
+  invalidateFolderCaches(destSafe);
+  invalidateFolderCaches(srcSafe);
+  notifyFolderChanged(destSafe);
+  notifyFolderChanged(srcSafe);
         await loadData();
       }
     } catch (e) {
@@ -1404,6 +1441,8 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   setStorageFolders(new Set());
   setStorageFiles([]);
   setSelection({ type: 'background', target: null });
+  // Notify and refresh so views update immediately
+  notifyFolderChanged(base);
   await loadData();
     } catch (error) {
       setIsError(true);
