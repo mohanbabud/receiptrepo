@@ -1,0 +1,13 @@
+{
+  "folders": [
+    { "name": "my-file-manager", "path": "." },
+    { "name": "observability-gke", "path": "observability-gke" }
+  ],
+  "settings": {
+    "terminal.integrated.defaultProfile.windows": "PowerShell",
+    "files.exclude": {
+      "**/.DS_Store": true,
+      "**/.terraform": true
+    }
+  }
+}
