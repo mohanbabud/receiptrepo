@@ -1,0 +1,45 @@
+mimir:
+  structuredConfig:
+    common:
+      storage:
+        backend: gcs
+        gcs:
+          bucket_name: REPLACE_BUCKET
+      replication_factor: 3
+    blocks_storage:
+      backend: gcs
+      tsdb:
+        dir: /data/tsdb
+      bucket_store:
+        sync_dir: /data/tsdb-sync
+    ruler:
+      storage:
+        backend: gcs
+        gcs:
+          bucket_name: REPLACE_BUCKET
+    alertmanager:
+      storage:
+        backend: gcs
+        gcs:
+          bucket_name: REPLACE_BUCKET
+    server:
+      log_level: info
+    memberlist:
+      join_members: []
+  # Attach KSA (Workload Identity) defined in env
+  serviceAccount: {}
+
+ruler:
+  enabled: true
+
+ingester:
+  persistence:
+    enabled: true
+    size: 10Gi
+store_gateway:
+  persistence:
+    enabled: true
+    size: 10Gi
+
+minio:
+  enabled: false

@@ -1,0 +1,23 @@
+grafana:
+  adminPassword: "${GRAFANA_ADMIN_PASS:-ChangeMe!}"
+  service:
+    type: LoadBalancer
+  additionalDataSources:
+    - name: Mimir
+      type: prometheus
+      access: proxy
+      url: http://mimir-query-frontend.mimir.svc.cluster.local:9090
+      isDefault: false
+
+prometheus:
+  prometheusSpec:
+    retention: 24h
+    walCompression: true
+    remoteWrite:
+      - url: http://mimir-distributor.mimir.svc.cluster.local:8080/api/v1/push
+        sendExemplar: true
+        remoteTimeout: 30s
+        queueConfig:
+          maxSamplesPerSend: 10000
+          capacity: 20000
+          maxShards: 8
