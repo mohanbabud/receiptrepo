@@ -144,6 +144,7 @@
   width: 100%;
   height: 100%;
   overflow: auto; /* allow scroll if needed on small viewports */
+  position: relative;
 }
 
 .image-preview img {
@@ -159,6 +160,41 @@
 /* Fit/Fill toggle support */
 .image-preview img.fit-contain { object-fit: contain; }
 .image-preview img.fit-cover { object-fit: cover; }
+
+/* Flipbook wrapper adds a subtle page flip animation on navigation */
+.flipbook {
+  position: relative;
+  display: inline-block;
+  border-radius: 6px;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.25);
+  transition: transform 0.3s ease;
+}
+.flipbook.flip-next { transform: rotateY(-8deg); }
+.flipbook.flip-prev { transform: rotateY(8deg); }
+.flipbook img { display: block; border-radius: 6px; }
+
+/* Prev/Next arrows */
+.nav-arrow {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  background: rgba(255,255,255,0.7);
+  border: 1px solid rgba(0,0,0,0.15);
+  color: #111827;
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  user-select: none;
+  z-index: 2;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+}
+.nav-arrow:hover { background: rgba(255,255,255,0.9); }
+.nav-left { left: 12px; padding-left: 2px; }
+.nav-right { right: 12px; padding-right: 2px; }
 
 .pdf-preview {
   width: 100%;
