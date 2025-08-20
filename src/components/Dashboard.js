@@ -206,6 +206,18 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
     }
   }, [clampPreviewWidth]);
 
+  // Jump to a path requested by TagSearchPage
+  useEffect(() => {
+    try {
+      const key = 'jumpToPath';
+      const v = localStorage.getItem(key);
+      if (v && typeof v === 'string') {
+        localStorage.removeItem(key);
+        if (v.startsWith('/files/')) setCurrentPath(v);
+      }
+    } catch {}
+  }, []);
+
   return (
     <div className="dashboard">
   <a href="#main-content" className="skip-link">Skip to content</a>
@@ -235,6 +247,7 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
             <AccentToggle accent={accent} setAccent={setAccent} />
             <PresetToggle preset={preset} setPreset={setPreset} />
             <StatusBar />
+            <Link to="/search" className="admin-link" title="Open Receipt Search">🔎 Search</Link>
           </div>
           {userRole === 'viewer' && (
             <button

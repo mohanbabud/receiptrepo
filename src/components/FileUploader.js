@@ -1,9 +1,11 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { ref, uploadBytesResumable, getDownloadURL, getMetadata } from 'firebase/storage';
-import { collection, addDoc } from 'firebase/firestore';
-import { storage, db } from '../firebase';
+import { collection, addDoc, getDoc, doc, setDoc } from 'firebase/firestore';
+import { storage, db, auth } from '../firebase';
 import './FileUploader.css';
+
+const DEFAULT_TAG_KEYS = ['ProjectName', 'Value', 'Reciepent', 'Date', 'ExpenseName'];
 
 const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] }) => {
   const [uploading, setUploading] = useState(false);
@@ -13,10 +15,50 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
   const [uploadTasks, setUploadTasks] = useState({}); // key -> uploadTask
   const [uploadStatus, setUploadStatus] = useState({}); // key -> 'running'|'paused'|'done'|'error'|'canceled'
   // image optimization mode for JPEGs only: 'balanced' (resize+reencode), 'lossless' (strip metadata only), 'off'
-  const [optMode, setOptMode] = useState('lossless');
+  const [optMode, setOptMode] = useState('off');
+  const [compressPdf, setCompressPdf] = useState(false); // lossless PDF optimize
   const folderInputRef = useRef(null);
   const cameraInputRef = useRef(null);
   const seededOnceRef = useRef(0);
+
+  // Tags state (applied to all uploaded files in this batch)
+  const [tagsRows, setTagsRows] = useState(DEFAULT_TAG_KEYS.map(k => ({ key: k, value: '' })));
+  const [tagsError, setTagsError] = useState('');
+  const buildTagsMap = useCallback((rows) => {
+    const map = {};
+    const seen = new Set();
+    for (const r of (rows || [])) {
+      const key = String(r.key || '').trim();
+      if (!key) continue;
+      if (/\s/.test(key)) throw new Error('Tag Name cannot contain spaces');
+      if (seen.has(key)) throw new Error('Duplicate Tag Names are not allowed');
+      seen.add(key);
+      map[key] = String(r.value ?? '');
+    }
+    return map;
+  }, []);
+
+  // Ensure the authenticated user has a profile doc with an allowed role
+  const ensureUserProfile = useCallback(async () => {
+    const u = auth.currentUser;
+    if (!u) return; // Not signed in; rules will block anyway downstream
+    try {
+      const uRef = doc(db, 'users', u.uid);
+      const snap = await getDoc(uRef);
+      if (!snap.exists()) {
+        // Only allow creating non-admin roles from the client per rules
+        const role = userRole === 'viewer' ? 'viewer' : 'user';
+        await setDoc(uRef, {
+          role,
+          email: u.email || null,
+          createdAt: new Date()
+        }, { merge: true });
+      }
+    } catch (e) {
+      // Non-fatal; uploads may still fail with clearer error below
+      console.warn('ensureUserProfile failed:', e);
+    }
+  }, [userRole]);
 
   // Generate unique file ID
   const generateFileId = () => {
@@ -136,60 +178,46 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
     }
   }, []);
 
-  const downscaleImage = useCallback(async (file) => {
-    try {
-      const blob = file;
-      const img = await new Promise((resolve, reject) => {
-        const image = new Image();
-        image.onload = () => resolve(image);
-        image.onerror = reject;
-        image.src = URL.createObjectURL(blob);
-      });
-      const canvas = document.createElement('canvas');
-      const maxEdge = 2000; // max width/height
-      let { width, height } = img;
-      const scale = Math.min(1, maxEdge / Math.max(width, height));
-      width = Math.round(width * scale);
-      height = Math.round(height * scale);
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(img, 0, 0, width, height);
-      const quality = 0.85;
-      const outputType = 'image/jpeg';
-      const optimizedBlob = await new Promise((resolve) => canvas.toBlob(resolve, outputType, quality));
-      URL.revokeObjectURL(img.src);
-      if (!optimizedBlob) return file;
-      // Preserve original filename; change extension if needed
-      let newName = file.name;
-      if (!/\.jpe?g$/i.test(newName)) newName = newName.replace(/\.[^.]+$/i, '') + '.jpg';
-      return new File([optimizedBlob], newName, { type: outputType, lastModified: Date.now() });
-    } catch (e) {
-      console.warn('Image optimization failed, uploading original', e);
-      return file;
-    }
-  }, []);
+  // Removed lossy downscale path for strict lossless-only policy.
 
   const preprocessFiles = useCallback(async (files) => {
     const out = [];
     for (const f of files) {
+      const isPdf = f.type === 'application/pdf' || /\.pdf$/i.test(f.name || '');
+      if (isPdf && compressPdf) {
+        out.push(await optimizePdfLossless(f));
+        continue;
+      }
       const isJpeg = f.type === 'image/jpeg' || /\.jpe?g$/i.test(f.name || '');
       if (isJpeg) {
-        if (optMode === 'off') {
-          out.push(f);
-        } else if (optMode === 'lossless') {
-          out.push(await stripJpegMetadataLossless(f));
-        } else {
-          // balanced/default path (resize and re-encode as high-quality JPEG)
-          out.push(await downscaleImage(f));
-        }
+    if (optMode === 'off') out.push(f);
+    else out.push(await stripJpegMetadataLossless(f));
       } else {
         // Leave non-JPEG images untouched
         out.push(f);
       }
     }
     return out;
-  }, [downscaleImage, stripJpegMetadataLossless, optMode]);
+  }, [stripJpegMetadataLossless, optMode, compressPdf]);
+
+  // Lossless PDF optimization: reload and re-save pages without re-encoding images.
+  const optimizePdfLossless = useCallback(async (file) => {
+    try {
+      const { PDFDocument } = await import('pdf-lib');
+      const src = await PDFDocument.load(await file.arrayBuffer());
+      const dst = await PDFDocument.create();
+      const pages = await dst.copyPages(src, src.getPageIndices());
+      pages.forEach(p => dst.addPage(p));
+      // Optionally clear document metadata to save a few bytes
+      try { dst.setTitle(''); dst.setAuthor(''); dst.setSubject(''); dst.setKeywords([]); dst.setProducer(''); dst.setCreator(''); } catch (_) {}
+      const newBytes = await dst.save();
+      const out = new File([new Uint8Array(newBytes)], file.name, { type: 'application/pdf', lastModified: Date.now() });
+      return out.size < file.size ? out : file;
+    } catch (e) {
+      console.warn('PDF lossless optimize skipped:', e);
+      return file;
+    }
+  }, []);
 
   const performUploads = useCallback(async (acceptedFilesRaw) => {
     if (userRole === 'viewer') {
@@ -202,12 +230,27 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
       return;
     }
 
+    // Validate tags before starting
+    let tagsMap;
+    try {
+      setTagsError('');
+      tagsMap = buildTagsMap(tagsRows);
+    } catch (e) {
+      const msg = e?.message || 'Invalid tags';
+      setTagsError(msg);
+      setError(msg);
+      return;
+    }
+
+  // Satisfy Firestore rule requiring users/{uid} with role in ['user','admin'] (or 'viewer' blocked earlier)
+  await ensureUserProfile();
+
     setUploading(true);
     setError('');
     setSuccess('');
   setUploadProgress({});
   setUploadStatus({});
-    const acceptedFiles = await preprocessFiles(acceptedFilesRaw);
+  const acceptedFiles = await preprocessFiles(acceptedFilesRaw);
     
     console.log('Starting upload for files:', acceptedFiles.map(f => f.name));
     
@@ -232,108 +275,95 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
       }
     };
   const uploadPromises = acceptedFiles.map(async (file) => {
-      const fileId = generateFileId();
-      // Retain original filename in Storage (no prefixing)
-      const fileName = file.name;
-      const { name: finalName, objectPath } = await ensureUniquePath(base, fileName);
-      const storageRef = ref(storage, objectPath);
-      
-      console.log('Uploading file to path:', objectPath);
-      
-      try {
-  const uploadTask = uploadBytesResumable(storageRef, file);
-        const key = file.name;
-        setUploadTasks(prev => ({ ...prev, [key]: uploadTask }));
-        
-        return new Promise((resolve, reject) => {
-          uploadTask.on(
-            'state_changed',
-            (snapshot) => {
-              const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
-              setUploadProgress(prev => ({
-                ...prev,
-                [key]: progress
-              }));
-              const state = snapshot.state; // 'running' | 'paused'
-              setUploadStatus(prev => ({ ...prev, [key]: state === 'paused' ? 'paused' : 'running' }));
-            },
-            (error) => {
-              console.error('Upload error for', file.name, ':', error);
-              setUploadStatus(prev => ({ ...prev, [key]: error?.code === 'storage/canceled' ? 'canceled' : 'error' }));
-              reject(error);
-            },
-            async () => {
-              try {
-                const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
-                
-                // Save file metadata to Firestore
-                const fileDoc = {
-                  id: fileId,
-                  name: finalName,
-                  originalName: file.name,
-                  path: currentPath,
-                  fullPath: objectPath,
-                  downloadURL,
-                  size: file.size,
-                  type: file.type,
-                  uploadedAt: new Date(),
-                  uploadedBy: userRole === 'admin' ? 'admin' : 'user',
-                  ...(file.type?.startsWith('image/') ? { ocrStatus: 'pending' } : {})
-                };
-                
-                await addDoc(collection(db, 'files'), fileDoc);
-                console.log('File metadata saved for:', file.name);
-                setUploadStatus(prev => ({ ...prev, [key]: 'done' }));
-                resolve();
-              } catch (error) {
-                console.error('Error saving file metadata:', error);
-                setUploadStatus(prev => ({ ...prev, [key]: 'error' }));
-                reject(error);
-              }
-            }
-          );
-        });
-      } catch (error) {
-        console.error('Error uploading file:', error);
-        throw error;
-      }
-    });
-
-    try {
-      await Promise.all(uploadPromises);
-      setUploadProgress({});
-      setSuccess(`Successfully uploaded ${acceptedFiles.length} file(s)!`);
-      try {
-        const base = computeBase(currentPath);
-        const normalized = (base + '/').replace(/^\/+/, '').replace(/\\/g,'/');
-        window.dispatchEvent(new CustomEvent('storage-meta-refresh', { detail: { prefix: normalized } }));
-        window.dispatchEvent(new CustomEvent('file-action-success', { detail: { message: 'Upload complete. Refreshing files…' } }));
-      } catch (_) {}
-      
-      // Clear success message after 3 seconds
-      setTimeout(() => setSuccess(''), 3000);
-      
-      if (onUploadComplete) {
-        onUploadComplete();
-      }
-    } catch (error) {
-      console.error('Upload error:', error);
-      setError('Error uploading files: ' + error.message);
-    } finally {
-      setUploading(false);
+    const fileId = generateFileId();
+    const fileName = file.name;
+    const { name: finalName, objectPath } = await ensureUniquePath(base, fileName);
+    const storageRef = ref(storage, objectPath);
+    console.log('Uploading file to path:', objectPath);
+    const customMetadata = {};
+    if (optMode === 'lossless' && (file.type === 'image/jpeg' || /\.jpe?g$/i.test(file.name))) {
+      customMetadata.autoOptimize = '1';
     }
-  }, [currentPath, onUploadComplete, userRole, preprocessFiles]);
+    if (compressPdf && (file.type === 'application/pdf' || /\.pdf$/i.test(file.name))) {
+      customMetadata.autoOptimize = '1';
+    }
+    const uploadTask = uploadBytesResumable(storageRef, file, { customMetadata });
+    const key = file.name;
+    setUploadTasks(prev => ({ ...prev, [key]: uploadTask }));
+    return new Promise((resolve, reject) => {
+      uploadTask.on(
+        'state_changed',
+        (snapshot) => {
+          const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
+          setUploadProgress(prev => ({ ...prev, [key]: progress }));
+          const state = snapshot.state;
+          setUploadStatus(prev => ({ ...prev, [key]: state === 'paused' ? 'paused' : 'running' }));
+        },
+        (error) => {
+          console.error('Upload error for', file.name, ':', error);
+          setUploadStatus(prev => ({ ...prev, [key]: error?.code === 'storage/canceled' ? 'canceled' : 'error' }));
+          reject(error);
+        },
+        async () => {
+          try {
+            const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
+            const fileDoc = {
+              id: fileId,
+              name: finalName,
+              originalName: file.name,
+              path: currentPath,
+              fullPath: objectPath,
+              downloadURL,
+              size: file.size,
+              type: file.type,
+              uploadedAt: new Date(),
+              uploadedBy: userRole === 'admin' ? 'admin' : 'user',
+              uploadedByUid: auth.currentUser ? auth.currentUser.uid : null,
+              ...(file.type?.startsWith('image/') ? { ocrStatus: 'pending' } : {}),
+              tags: tagsMap
+            };
+            await addDoc(collection(db, 'files'), fileDoc);
+            console.log('File metadata saved for:', file.name);
+            setUploadStatus(prev => ({ ...prev, [key]: 'done' }));
+            resolve();
+          } catch (err) {
+            console.error('Error saving file metadata:', err);
+            setUploadStatus(prev => ({ ...prev, [key]: 'error' }));
+            reject(err);
+          }
+        }
+      );
+    });
+  });
+
+  try {
+    await Promise.all(uploadPromises);
+    setUploadProgress({});
+    setSuccess(`Successfully uploaded ${acceptedFiles.length} file(s)!`);
+    try {
+      const base = computeBase(currentPath);
+      const normalized = (base + '/').replace(/^\/+/, '').replace(/\\/g,'/');
+      window.dispatchEvent(new CustomEvent('storage-meta-refresh', { detail: { prefix: normalized } }));
+      window.dispatchEvent(new CustomEvent('file-action-success', { detail: { message: 'Upload complete. Refreshing files…' } }));
+    } catch (_) {}
+    setTimeout(() => setSuccess(''), 3000);
+    if (onUploadComplete) onUploadComplete();
+  } catch (error) {
+    console.error('Upload error:', error);
+    setError('Error uploading files: ' + error.message);
+  } finally {
+    setUploading(false);
+  }
+  }, [currentPath, onUploadComplete, userRole, preprocessFiles, ensureUserProfile]);
 
   const { getRootProps, getInputProps, isDragActive, isDragReject, open } = useDropzone({
     onDrop: performUploads,
     disabled: uploading || userRole === 'viewer',
-    noClick: true,       // prevent auto-opening on container clicks
-    noKeyboard: true,    // avoid Enter/Space triggering dialog
-    maxSize: 524288000, // 500MB per file
+    noClick: true,
+    noKeyboard: true,
+    maxSize: 524288000,
     onDropRejected: (fileRejections) => {
-      const errors = fileRejections.map(rejection => 
-        `${rejection.file.name}: ${rejection.errors.map(e => e.message).join(', ')}`
-      );
+      const errors = fileRejections.map(rejection => `${rejection.file.name}: ${rejection.errors.map(e => e.message).join(', ')}`);
       setError('File(s) rejected: ' + errors.join('; '));
     }
   });
@@ -341,20 +371,26 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
   // Handle folder selection using webkitdirectory
   const onFolderPicked = async (e) => {
     const fileList = Array.from(e.target.files || []);
-    if (userRole === 'viewer') {
-      setError('You do not have permission to upload files');
+    if (userRole === 'viewer') { setError('You do not have permission to upload files'); return; }
+    if (fileList.length === 0) return;
+    // Validate tags before starting
+    let tagsMap;
+    try {
+      setTagsError('');
+      tagsMap = buildTagsMap(tagsRows);
+    } catch (e2) {
+      const msg = e2?.message || 'Invalid tags';
+      setTagsError(msg);
+      setError(msg);
       return;
     }
-    if (fileList.length === 0) return;
-
+  await ensureUserProfile();
     setUploading(true);
     setError('');
     setSuccess('');
     setUploadProgress({});
-
     const base = computeBase(currentPath);
     const ensureUniquePath = async (fullPath) => {
-      // For folders, fullPath includes subdirectories and filename
       const parts = fullPath.split('/');
       const fileName = parts.pop();
       const folderBase = parts.join('/');
@@ -365,50 +401,42 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
       while (true) {
         const name = attempt === 0 ? fileName : `${stem} (${attempt})${ext}`;
         const candidate = `${folderBase}/${name}`;
-        try {
-          await getMetadata(ref(storage, candidate));
-          attempt += 1; // exists
-        } catch (_) {
-          return candidate; // not exists
-        }
+        try { await getMetadata(ref(storage, candidate)); attempt += 1; } catch (_) { return candidate; }
       }
     };
-
     try {
       const tasks = fileList.map(async (file) => {
-        // Optimize JPEGs according to current mode
         const [optFile] = await preprocessFiles([file]);
-        // Preserve relative path inside the chosen folder
         const relPathRaw = file.webkitRelativePath || file.name;
         const relPath = relPathRaw.replace(/\\/g, '/').replace(/^\/+/, '');
-        // If optimization changed filename (e.g., png->jpg via balanced), update the leaf name in relPath
         let relParts = relPath.split('/');
         relParts[relParts.length - 1] = optFile.name;
         const finalRelPath = relParts.join('/');
         const desiredPath = `${base}/${finalRelPath}`.replace(/\/+/, '/');
-        let finalPath = null;
-        const computePath = async () => {
-          finalPath = await ensureUniquePath(desiredPath);
-          return finalPath;
-        };
+        const objectPath = await ensureUniquePath(desiredPath);
         return new Promise((resolve, reject) => {
-          computePath().then((objectPath) => {
-            const uploadTask = uploadBytesResumable(ref(storage, objectPath), optFile);
-            setUploadTasks(prev => ({ ...prev, [finalRelPath]: uploadTask }));
-            uploadTask.on(
+          const customMetadata = {};
+          if (optMode === 'lossless' && (optFile.type === 'image/jpeg' || /\.jpe?g$/i.test(optFile.name))) {
+            customMetadata.autoOptimize = '1';
+          }
+          if (compressPdf && (optFile.type === 'application/pdf' || /\.pdf$/i.test(optFile.name))) {
+            customMetadata.autoOptimize = '1';
+          }
+          const uploadTask = uploadBytesResumable(ref(storage, objectPath), optFile, { customMetadata });
+          setUploadTasks(prev => ({ ...prev, [finalRelPath]: uploadTask }));
+          uploadTask.on(
             'state_changed',
             (snapshot) => {
               const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
               setUploadProgress(prev => ({ ...prev, [finalRelPath]: progress }));
-                const state = snapshot.state;
-                setUploadStatus(prev => ({ ...prev, [finalRelPath]: state === 'paused' ? 'paused' : 'running' }));
+              const state = snapshot.state;
+              setUploadStatus(prev => ({ ...prev, [finalRelPath]: state === 'paused' ? 'paused' : 'running' }));
             },
-              (err) => { setUploadStatus(prev => ({ ...prev, [finalRelPath]: err?.code === 'storage/canceled' ? 'canceled' : 'error' })); reject(err); },
+            (err) => { setUploadStatus(prev => ({ ...prev, [finalRelPath]: err?.code === 'storage/canceled' ? 'canceled' : 'error' })); reject(err); },
             async () => {
               try {
                 const finalRef = uploadTask.snapshot.ref;
-                await getDownloadURL(finalRef);
-                // Optional: write metadata to Firestore (best-effort)
+                const downloadURL = await getDownloadURL(finalRef);
                 try {
                   const dirPart = finalRelPath.split('/').slice(0, -1).join('/');
                   await addDoc(collection(db, 'files'), {
@@ -417,18 +445,20 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
                     originalName: file.name,
                     path: `/${base}/${dirPart}`,
                     fullPath: finalRef.fullPath,
+                    downloadURL,
                     size: optFile.size,
                     type: optFile.type || file.type,
                     uploadedAt: new Date(),
-                    uploadedBy: userRole === 'admin' ? 'admin' : 'user'
+                    uploadedBy: userRole === 'admin' ? 'admin' : 'user',
+                    uploadedByUid: auth.currentUser ? auth.currentUser.uid : null,
+                    tags: tagsMap
                   });
-                } catch (_) { /* ignore metadata errors */ }
-                  setUploadStatus(prev => ({ ...prev, [finalRelPath]: 'done' }));
+                } catch (_) {}
+                setUploadStatus(prev => ({ ...prev, [finalRelPath]: 'done' }));
                 resolve();
               } catch (e2) { reject(e2); }
             }
           );
-          }).catch(reject);
         });
       });
       await Promise.all(tasks);
@@ -439,22 +469,9 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
       setError('Error uploading folder: ' + (err.message || String(err)));
     } finally {
       setUploading(false);
-      // reset input so the same folder can be picked again
       if (folderInputRef.current) folderInputRef.current.value = '';
     }
   };
-
-  // Seeded files upload (from external drop banner)
-  useEffect(() => {
-    const files = Array.isArray(seedFiles) ? seedFiles : [];
-    if (!files.length) return;
-    // avoid re-triggering for the same batch
-    if (seededOnceRef.current === files.length) return;
-    seededOnceRef.current = files.length;
-    performUploads(files);
-  }, [seedFiles, performUploads]);
-
-  // Resumable controls
   const pauseAll = () => {
     Object.values(uploadTasks).forEach(t => { try { t.pause(); } catch {} });
   };
@@ -526,13 +543,16 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
                 <p><strong>Drag & drop files here</strong></p>
                 <p className="or">or</p>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-                  <label htmlFor="optMode" style={{ fontSize: 12, opacity: 0.8 }}>Image optimization:</label>
+                  <label htmlFor="optMode" style={{ fontSize: 12, opacity: 0.8 }}>Image optimization (opt-in):</label>
                   <select id="optMode" value={optMode} onChange={(e) => setOptMode(e.target.value)} style={{ fontSize: 12 }}>
-                    <option value="balanced">Balanced (resize to 2000px, high quality)</option>
                     <option value="lossless">Lossless (strip metadata only)</option>
                     <option value="off">Off</option>
                   </select>
-                  <small style={{ fontSize: 11, opacity: 0.65 }}>Note: JPEGs are also auto-optimized on upload server-side.</small>
+                  <small style={{ fontSize: 11, opacity: 0.65 }}>Note: Optimization runs only when selected here.</small>
+                  <label style={{ marginLeft: 12, display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+                    <input type="checkbox" checked={compressPdf} onChange={(e) => setCompressPdf(e.target.checked)} />
+                    Optimize PDFs (lossless, opt-in)
+                  </label>
                 </div>
                 <button
                   type="button"
@@ -583,6 +603,44 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
                 <div className="file-info">
                   <small>Supports bulk upload of files and folders (structure preserved)</small>
                   <small>Max size: 500MB per file</small>
+                </div>
+                <div style={{ marginTop: 10, width: '100%', maxWidth: 640 }}>
+                  <div style={{ marginBottom: 6, color: '#475569', fontSize: 12, fontWeight: 600 }}>Tags applied to uploaded files</div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 8, paddingBottom: 4, borderBottom: '1px solid #e5e7eb', color: '#475569', fontSize: 12, fontWeight: 600 }}>
+                    <div>Tag Name</div>
+                    <div>Value</div>
+                    <div style={{ textAlign: 'right' }}>Actions</div>
+                  </div>
+                  {(tagsRows || []).map((row, idx) => (
+                    <div key={idx} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 8, alignItems: 'center', marginTop: 6 }}>
+                      <input
+                        type="text"
+                        placeholder="Tag Name"
+                        value={row.key}
+                        onChange={(e) => { setTagsRows(prev => prev.map((r, i) => i === idx ? { ...r, key: e.target.value } : r)); setTagsError(''); }}
+                        style={{ padding: '8px 10px', border: '1px solid #cbd5e1', borderRadius: 6 }}
+                      />
+                      <input
+                        type="text"
+                        placeholder="Value"
+                        value={row.value}
+                        onChange={(e) => { setTagsRows(prev => prev.map((r, i) => i === idx ? { ...r, value: e.target.value } : r)); setTagsError(''); }}
+                        style={{ padding: '8px 10px', border: '1px solid #cbd5e1', borderRadius: 6 }}
+                      />
+                      <button type="button" title="Remove" onClick={() => setTagsRows(prev => {
+                        const next = prev.filter((_, i) => i !== idx);
+                        return next.length > 0 ? next : [{ key: '', value: '' }];
+                      })} style={{ padding: '6px 10px', border: '1px solid #fecaca', background: '#fff', color: '#b42318', borderRadius: 6 }}>
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                  <div style={{ marginTop: 8 }}>
+                    <button type="button" onClick={() => setTagsRows(prev => [...prev, { key: '', value: '' }])} title="Add tag" style={{ padding: '6px 10px', border: '1px solid #cbd5e1', borderRadius: 6, background: '#f8fafc' }}>+ Add</button>
+                  </div>
+                  {tagsError && (
+                    <div style={{ color: '#b42318', fontSize: 13, marginTop: 6 }}>{tagsError}</div>
+                  )}
                 </div>
               </>
             )}

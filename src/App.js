@@ -7,6 +7,7 @@ import Login from './components/Login';
 import Dashboard from './components/Dashboard';
 import AdminPanel from './components/AdminPanel';
 import TreeViewPage from './components/TreeViewPage';
+import TagSearchPage from './components/TagSearchPage';
 import './App.css';
 
 function App() {
@@ -170,6 +171,7 @@ function App() {
           <Route path="/dashboard" element={user ? <Dashboard user={user} userRole={userRole} theme={theme} setTheme={setTheme} accent={accent} setAccent={setAccent} preset={preset} setPreset={setPreset} /> : <Navigate to="/login" />} />
           <Route path="/admin" element={user && userRole === 'admin' ? <AdminPanel user={user} /> : <Navigate to="/dashboard" />} />
           <Route path="/tree-view" element={user ? <TreeViewPage user={user} userRole={userRole} /> : <Navigate to="/login" />} />
+          <Route path="/search" element={user ? <TagSearchPage /> : <Navigate to="/login" />} />
           <Route path="/" element={<Navigate to={user ? '/dashboard' : '/login'} />} />
         </Routes>
       </Router>

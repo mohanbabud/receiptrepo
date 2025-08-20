@@ -2,6 +2,7 @@
 /* eslint-disable react-hooks/exhaustive-deps */
 /* eslint-disable no-loop-func */
 import React, { useState, useEffect, useRef } from 'react';
+// import { Link } from 'react-router-dom';
 import { ref, listAll, getMetadata, uploadBytes, deleteObject, getDownloadURL } from 'firebase/storage';
 import { httpsCallable } from 'firebase/functions';
 import { functions } from '../firebase';
@@ -14,6 +15,7 @@ import { MacFolderIcon, MacFileIcon } from './icons/MacIcons';
 import './FolderTree.css';
 
 const ROOT_PATH = '/files/';
+const DEFAULT_TAG_KEYS = ['ProjectName', 'Value', 'Reciepent', 'Date', 'ExpenseName'];
 
 const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFileSelect, filesOnly = false }) => {
   // State
@@ -71,6 +73,10 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   // Cache for direct counts per folder to avoid repeated listAll; separate from folderCounts state
   const countsCacheRef = useRef(new Map()); // Map<string, { files: number, subfolders: number, ts: number }>
   const [progress, setProgress] = useState({ active: false, value: 0, total: 0, label: '' });
+  const [editingTagsFor, setEditingTagsFor] = useState(null); // file id
+  const [tagsRows, setTagsRows] = useState([{ key: '', value: '' }]);
+  const [tagsError, setTagsError] = useState('');
+  // Tag search moved to dedicated page; no local state here
 
   // Auto-close success popup after a short delay (2s for success, 5s for errors)
   useEffect(() => {
@@ -216,10 +222,11 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     }, (err) => console.warn('folders_meta listener error', err));
 
     // Favorites (per-user)
-    let unsubFav = null;
+  let unsubFav = null;
   const unsubAuth = onAuthStateChanged(auth, (u) => {
       setAuthReady(true);
       if (unsubFav) { try { unsubFav(); } catch {} finally { unsubFav = null; } }
+      
       if (!u) {
         setFavoriteFolders(new Set());
         return;
@@ -232,11 +239,12 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
         });
         setFavoriteFolders(set);
       }, (err) => console.warn('favorites listener error', err));
+
     });
 
     return () => {
-      try { unsubLabels(); } catch {}
-      try { unsubFav && unsubFav(); } catch {}
+  try { unsubLabels(); } catch {}
+  try { unsubFav && unsubFav(); } catch {}
       try { unsubAuth(); } catch {}
     };
   }, []);
@@ -551,6 +559,59 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storageFiles, filePage, pageSize, fileFilter, fileSort, fileSortDir, includeNestedFiles, currentPath]);
 
+  // Prefetch Firestore file docs (tags & owner) for visible page items
+  useEffect(() => {
+    const safe = normalizeFolderPath(currentPath || ROOT_PATH);
+    if (includeNestedFiles) return;
+    // Recompute page items similar to renderFilesForPath
+    const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+    let files = storageFiles.filter(f => f.path === safe && f.name !== '.keep' && f.name !== '.folder-placeholder');
+    if (fileFilter) files = files.filter(f => f.name.toLowerCase().includes(fileFilter.toLowerCase()));
+    files = files.sort((a, b) => {
+      let cmp = 0;
+      if (fileSort === 'name') cmp = collator.compare(a.name || '', b.name || '');
+      else if (fileSort === 'size') cmp = (a.size || 0) - (b.size || 0);
+      else if (fileSort === 'type') cmp = collator.compare(a.type || '', b.type || '');
+      else if (fileSort === 'modified') {
+        const da = a.uploadedAt instanceof Date ? a.uploadedAt.getTime() : 0;
+        const db = b.uploadedAt instanceof Date ? b.uploadedAt.getTime() : 0;
+        cmp = da - db;
+      }
+      return fileSortDir === 'asc' ? cmp : -cmp;
+    });
+    const start = (filePage - 1) * pageSize;
+    const pageItems = files.slice(start, start + pageSize);
+    const need = pageItems.filter(f => f?.ref?.fullPath && (typeof f.tags === 'undefined' || typeof f.ownerUid === 'undefined'));
+    if (need.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const paths = need.map(f => f.ref.fullPath).slice(0, 60);
+        const batches = [];
+        for (let i = 0; i < paths.length; i += 10) {
+          const chunk = paths.slice(i, i + 10);
+          batches.push(fsQuery(collection(db, 'files'), where('fullPath', 'in', chunk)));
+        }
+        const snaps = await Promise.all(batches.map(q => getDocs(q)));
+        if (cancelled) return;
+        const byPath = new Map();
+        for (const snap of snaps) {
+          snap.forEach(d => { const data = d.data() || {}; if (data.fullPath) byPath.set(data.fullPath, data); });
+        }
+        if (byPath.size) {
+          setStorageFiles(prev => prev.map(x => {
+            const fp = x?.ref?.fullPath;
+            if (!fp || !byPath.has(fp)) return x;
+            const meta = byPath.get(fp);
+            return { ...x, tags: (meta.tags && typeof meta.tags === 'object') ? meta.tags : x.tags, ownerUid: meta.uploadedByUid || x.ownerUid };
+          }));
+        }
+      } catch (_) { /* ignore */ }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storageFiles, filePage, pageSize, fileFilter, fileSort, fileSortDir, includeNestedFiles, currentPath]);
+
   // UI helpers
   const formatFileSize = (bytes) => {
     if (typeof bytes !== 'number') return 'Unknown';
@@ -589,6 +650,8 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
       // ignore
     }
   };
+
+  // Tag Search moved to dedicated page; all related logic removed from this component.
 
   const getFileIcon = (fileName, fileType) => {
   if (fileType?.startsWith('image/')) return <MacFileIcon type="image" className="file-icon image" />;
@@ -993,33 +1056,38 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     // Paste
     if (ctrl && key.toLowerCase() === 'v') {
       e.preventDefault();
-      if (!clipboard) return;
-      const destFolder = normalizeFolderPath(currentPath);
-      try {
-        if (clipboard.itemType === 'file') {
-          const fileItem = clipboard.payload;
-          const dest = `${destFolder}${fileItem.name}`;
-          const data = await import('firebase/storage').then(mod => mod.getBytes(fileItem.ref));
-          const destRef = ref(storage, dest.replace(/^\/+/, ''));
-          await uploadBytes(destRef, data);
-          if (clipboard.action === 'cut') {
-            await deleteObject(fileItem.ref);
-          }
-        } else if (clipboard.itemType === 'folder') {
-          const srcFolderPath = clipboard.payload;
-          await copyFolder(srcFolderPath, destFolder, clipboard.action === 'cut');
-        }
-        setClipboard(null);
-        await loadData();
-  setSuccessMessage('Paste completed');
-  setIsError(false);
-  setShowSuccessPopup(true);
-      } catch (e2) {
-        setIsError(true);
-        setSuccessMessage('Error pasting: ' + (e2.message || e2.toString()));
-        setShowSuccessPopup(true);
-      }
+      await pasteIntoFolder(normalizeFolderPath(currentPath));
       return;
+    }
+  };
+
+  // Helper: paste current clipboard into specified destination folder
+  const pasteIntoFolder = async (destFolder) => {
+    if (!clipboard) return;
+    const dest = normalizeFolderPath(destFolder);
+    try {
+      if (clipboard.itemType === 'file') {
+        const fileItem = clipboard.payload;
+        const target = `${dest}${fileItem.name}`;
+        const data = await import('firebase/storage').then(mod => mod.getBytes(fileItem.ref));
+        const destRef = ref(storage, target.replace(/^\/+/, ''));
+        await uploadBytes(destRef, data);
+        if (clipboard.action === 'cut') {
+          await deleteObject(fileItem.ref);
+        }
+      } else if (clipboard.itemType === 'folder') {
+        const srcFolderPath = clipboard.payload;
+        await copyFolder(srcFolderPath, dest, clipboard.action === 'cut');
+      }
+      setClipboard(null);
+      await loadData();
+      setSuccessMessage('Paste completed');
+      setIsError(false);
+      setShowSuccessPopup(true);
+    } catch (e2) {
+      setIsError(true);
+      setSuccessMessage('Error pasting: ' + (e2.message || e2.toString()));
+      setShowSuccessPopup(true);
     }
   };
 
@@ -1726,6 +1794,46 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                 )}
               </div>
               <div className="file-actions" style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto', paddingRight: 8 }} onClick={e => e.stopPropagation()}>
+                {/* Tags pills and editor */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, maxWidth: 420 }}>
+                  <div
+                    style={{ display: 'flex', flexWrap: 'wrap', gap: 6, maxHeight: 48, overflow: 'hidden' }}
+                    title={file.tags ? Object.entries(file.tags).map(([k,v]) => `${k}=${v}`).join(', ') : ''}
+                  >
+                    {(file.tags && Object.keys(file.tags).length)
+                      ? Object.entries(file.tags).map(([k, v]) => (
+                          <span
+                            key={k}
+                            style={{
+                              fontSize: 11,
+                              color: '#334155',
+                              background: '#eef2ff',
+                              border: '1px solid #e2e8f0',
+                              borderRadius: 999,
+                              padding: '2px 8px',
+                              lineHeight: 1.6,
+                              whiteSpace: 'nowrap'
+                            }}
+                          >
+                            {k}{String(v ?? '') !== '' ? `=${v}` : ''}
+                          </span>
+                        ))
+                      : null}
+                  </div>
+                  {((userRole === 'admin') || (auth?.currentUser && file.ownerUid === auth.currentUser.uid)) && (
+                    <button className="icon-btn" title="Edit tags" onClick={() => {
+                      setEditingTagsFor(file.id);
+                      const existing = (file.tags && Object.keys(file.tags).length)
+                        ? Object.entries(file.tags).map(([k, v]) => ({ key: String(k), value: String(v ?? '') }))
+                        : [];
+                      const existingKeys = new Set(existing.map(r => r.key));
+                      const suggested = DEFAULT_TAG_KEYS.filter(k => !existingKeys.has(k)).map(k => ({ key: k, value: '' }));
+                      const rows = (existing.length + suggested.length) ? [...existing, ...suggested] : [{ key: '', value: '' }];
+                      setTagsRows(rows);
+            setTagsError('');
+                    }} style={{ border: '1px solid #cbd5e1', borderRadius: 6, padding: '4px 8px', background: '#fff' }}>🏷️</button>
+                  )}
+                </div>
                 <button className="icon-btn preview" title="Preview" onClick={() => previewFile(file)}>
                   <FaEye />
                 </button>
@@ -1771,6 +1879,100 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
             </select>
           </div>
         )}
+        {editingTagsFor && (() => {
+          const tgt = pageItems.find(f => f.id === editingTagsFor);
+          const close = () => { setEditingTagsFor(null); setTagsRows([{ key: '', value: '' }]); setTagsError(''); };
+          const save = async () => {
+            if (!tgt) { close(); return; }
+            // Validate keys: no spaces, no duplicates
+            setTagsError('');
+            const raw = (tagsRows || []).map(r => ({ key: String(r.key || '').trim(), value: String(r.value ?? '') }));
+            const nonEmpty = raw.filter(r => r.key.length > 0);
+            if (nonEmpty.some(r => /\s/.test(r.key))) { setTagsError('Tag Name cannot contain spaces'); return; }
+            const seen = new Set();
+            for (const r of nonEmpty) { if (seen.has(r.key)) { setTagsError('Duplicate Tag Names are not allowed'); return; } seen.add(r.key); }
+            const map = {};
+            for (const r of nonEmpty) { map[r.key] = r.value; }
+            try {
+              // Find doc(s) in Firestore by fullPath
+              const fullPath = tgt?.ref?.fullPath;
+              if (fullPath) {
+                const snaps = await getDocs(fsQuery(collection(db, 'files'), where('fullPath', '==', fullPath)));
+                const batch = (await import('firebase/firestore')).writeBatch(db);
+                snaps.forEach(d => batch.update(d.ref, { tags: map }));
+                await batch.commit();
+              }
+              // Update local state for immediate UI feedback
+              setStorageFiles(prev => prev.map(x => x.id === tgt.id ? { ...x, tags: map } : x));
+              setSuccessMessage('Tags updated'); setIsError(false); setShowSuccessPopup(true);
+            } catch (e) {
+              console.warn('Tag update failed', e);
+              setIsError(true); setSuccessMessage('Failed to update tags'); setShowSuccessPopup(true);
+            } finally { close(); }
+          };
+          return (
+            <div className="modal-backdrop" role="dialog" aria-modal="true">
+              <div className="modal" style={{ padding: 12, background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, maxWidth: 520 }}>
+                <h4 style={{ marginTop: 0 }}>Edit Tags</h4>
+                <div style={{ display: 'grid', gap: 10 }}>
+                  <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: 10 }}>
+                    <div style={{ color: '#475569', fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Current tags</div>
+                    {tgt?.tags && Object.keys(tgt.tags).length ? (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                        {Object.entries(tgt.tags).map(([k, v]) => (
+                          <span key={k} style={{ fontSize: 11, color: '#334155', background: '#eef2ff', border: '1px solid #e2e8f0', borderRadius: 999, padding: '2px 8px', lineHeight: 1.6 }}>
+                            {k}{String(v ?? '') !== '' ? `=${v}` : ''}
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <div style={{ color: '#64748b', fontSize: 12 }}>No tags yet.</div>
+                    )}
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 8, paddingBottom: 4, borderBottom: '1px solid #e5e7eb', color: '#475569', fontSize: 12, fontWeight: 600 }}>
+                    <div>Tag Name</div>
+                    <div>Value</div>
+                    <div style={{ textAlign: 'right' }}>Actions</div>
+                  </div>
+                  {(tagsRows || []).map((row, idx) => (
+                    <div key={idx} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 8, alignItems: 'center' }}>
+                      <input
+                        type="text"
+                        placeholder="Tag Name"
+                        value={row.key}
+                        onChange={(e) => { setTagsRows(prev => prev.map((r, i) => i === idx ? { ...r, key: e.target.value } : r)); setTagsError(''); }}
+                        style={{ padding: '8px 10px', border: '1px solid #cbd5e1', borderRadius: 6 }}
+                      />
+                      <input
+                        type="text"
+                        placeholder="Value"
+                        value={row.value}
+                        onChange={(e) => { setTagsRows(prev => prev.map((r, i) => i === idx ? { ...r, value: e.target.value } : r)); setTagsError(''); }}
+                        style={{ padding: '8px 10px', border: '1px solid #cbd5e1', borderRadius: 6 }}
+                      />
+                      <button type="button" title="Remove" onClick={() => setTagsRows(prev => {
+                        const next = prev.filter((_, i) => i !== idx);
+                        return next.length > 0 ? next : [{ key: '', value: '' }];
+                      })} style={{ padding: '6px 10px', border: '1px solid #fecaca', background: '#fff', color: '#b42318', borderRadius: 6 }}>
+                        <FaTrash />
+                      </button>
+                    </div>
+                  ))}
+                  <div>
+                    <button type="button" onClick={() => setTagsRows(prev => [...prev, { key: '', value: '' }])} title="Add tag" style={{ padding: '6px 10px', border: '1px solid #cbd5e1', borderRadius: 6, background: '#f8fafc' }}>+ Add</button>
+                  </div>
+                  {tagsError && (
+                    <div style={{ color: '#b42318', fontSize: 13 }}>{tagsError}</div>
+                  )}
+                </div>
+                <div style={{ display: 'flex', gap: 8, marginTop: 10, justifyContent: 'flex-end' }}>
+                  <button onClick={close} style={{ padding: '8px 12px', border: '1px solid #cbd5e1', borderRadius: 6, background: '#fff' }}>Cancel</button>
+                  <button onClick={save} style={{ padding: '8px 12px', background: '#2563eb', color: '#fff', border: 'none', borderRadius: 6 }}>Save</button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
       </div>
     );
   };
@@ -1985,6 +2187,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
           </div>
         </div>
         <div className="tree-controls">
+          {/* Tag Search button removed from Files section */}
           {!filesOnly && (
             <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
               {userRole !== 'viewer' && (
@@ -2079,6 +2282,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
             </label>
           </div>
         </div>
+  {/* Tag Search UI removed from dashboard; use the dedicated page instead */}
       </div>
       {/* Lightweight stats for the current folder to aid clarity */}
       {/* Manual refresh control */}
@@ -2126,8 +2330,10 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
               ) : (
                 <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer', color: '#f59e42' }} onClick={() => handleMenuAction('delete')}>📝 Request Delete</div>
               )}
-              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('copy')}>📋 Copy</div>
-              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('move')}>📦 Move</div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => { setClipboard({ action: 'copy', itemType: 'folder', payload: contextMenu.target }); hideContextMenu(); }}>📋 Copy</div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => { setClipboard({ action: 'cut', itemType: 'folder', payload: contextMenu.target }); hideContextMenu(); }}>✂️ Cut</div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: clipboard ? 'pointer' : 'not-allowed', opacity: clipboard ? 1 : 0.5 }} onClick={() => { if (clipboard) pasteIntoFolder(contextMenu.target); }}>📎 Paste here</div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('move')}>📦 Move (picker)</div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('download')}>⬇️ Download (.zip)</div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('favorite')}>{favoriteFolders.has(contextMenu.target) ? '⭐ Unfavorite' : '☆ Favorite'}</div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('labels')}>🏷️ Edit labels</div>
@@ -2145,17 +2351,20 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
               ) : (
                 <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer', color: '#f59e42' }} onClick={() => handleMenuAction('delete')}>📝 Request Delete</div>
               )}
-              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('copy')}>📋 Copy</div>
-              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('move')}>📦 Move</div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => { setClipboard({ action: 'copy', itemType: 'file', payload: contextMenu.target }); hideContextMenu(); }}>📋 Copy</div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => { setClipboard({ action: 'cut', itemType: 'file', payload: contextMenu.target }); hideContextMenu(); }}>✂️ Cut</div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: clipboard ? 'pointer' : 'not-allowed', opacity: clipboard ? 1 : 0.5 }} onClick={() => { if (clipboard) pasteIntoFolder(getParentFolderPath(contextMenu.target)); }}>📎 Paste into this folder</div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('move')}>📦 Move (picker)</div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('download')}>⬇️ Download</div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('details')}>ℹ️ Details</div>
             </>
           )}
-          {contextMenu.type === 'background' && (
+      {contextMenu.type === 'background' && (
             <>
               <div className="context-menu-title" style={{ padding: '8px 16px', fontWeight: 'bold', color: '#444', borderBottom: '1px solid #eee' }}>Here</div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-folder')}>📁 New Folder <span className="plus-icon">+</span></div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-file')}>📄 New File</div>
+        <div className="context-menu-item" style={{ padding: '8px 16px', cursor: clipboard ? 'pointer' : 'not-allowed', opacity: clipboard ? 1 : 0.5 }} onClick={() => { if (clipboard) pasteIntoFolder(normalizeFolderPath(currentPath)); }}>📎 Paste</div>
             </>
           )}
         </div>

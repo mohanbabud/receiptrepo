@@ -45,7 +45,7 @@ const AdminPanel = ({ user }) => {
   // Optimize existing images
   const [optPrefix, setOptPrefix] = useState('files/');
   const [optLimit, setOptLimit] = useState(25);
-  const [optMode, setOptMode] = useState('balanced');
+  const [optMode, setOptMode] = useState('lossless');
   const [optDryRun, setOptDryRun] = useState(true);
   const [optOverwrite, setOptOverwrite] = useState(false);
   const [optLoading, setOptLoading] = useState(false);
@@ -351,7 +351,7 @@ const AdminPanel = ({ user }) => {
       <h3>Optimize Existing Images</h3>
       <p style={{ maxWidth: 820, color: '#555' }}>Compress existing JPEGs in Storage. Start with a dry run to preview size savings.</p>
       <p style={{ maxWidth: 820, color: '#6b7280', marginTop: 6, fontSize: 13 }}>
-        Note: Files already optimized with the same mode are skipped unless you enable "Overwrite". Uploads are optimized with <strong>balanced</strong> by default.
+        Note: Files already optimized with the same mode are skipped unless you enable "Overwrite". Upload optimization is <strong>opt‑in</strong> at upload time.
       </p>
       <div className="settings-grid">
         <div className="field">
@@ -366,7 +366,6 @@ const AdminPanel = ({ user }) => {
           <label>Mode</label>
           <select value={optMode} onChange={e => setOptMode(e.target.value)}>
             <option value="lossless">Lossless (strip metadata)</option>
-            <option value="balanced">Balanced (≤2000px, q≈85)</option>
           </select>
         </div>
         <label className="switch">
