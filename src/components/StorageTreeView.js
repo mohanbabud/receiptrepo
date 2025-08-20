@@ -338,6 +338,9 @@ const StorageTreeView = ({ onFolderSelect, currentPath, refreshTrigger, userRole
         } catch {}
         try {
           window.dispatchEvent(new CustomEvent('file-action-success', { detail: { message: `Deleted folder "${name}".` } }));
+          // Also broadcast a storage refresh with the deleted folder's parent as prefix
+          const parentPrefix = (safe.replace(/^\/+/, '').replace(/\\/g, '/')).replace(/[^/]+\/?$/, '');
+          window.dispatchEvent(new CustomEvent('storage-meta-refresh', { detail: { prefix: parentPrefix || 'files/' } }));
         } catch {}
       }
     } finally {

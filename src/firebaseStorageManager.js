@@ -3,6 +3,8 @@
 
 import { storage } from './firebase';
 import { ref, uploadBytes, getDownloadURL, deleteObject, listAll } from 'firebase/storage';
+import { db } from './firebase';
+import { doc, setDoc, getDoc, updateDoc, query, collection, where, getDocs, limit } from 'firebase/firestore';
 
 /**
  * Uploads a file to a specified path in Firebase Storage.
@@ -14,6 +16,76 @@ export async function uploadFile(path, file) {
   const storageRef = ref(storage, path);
   await uploadBytes(storageRef, file);
   return await getDownloadURL(storageRef);
+}
+
+/**
+ * Sets tags metadata for a file in Firestore.
+ * @param {string} fileId - Unique file ID or Firestore doc ID
+ * @param {Object} tags - Key-value map of tags
+ * @returns {Promise<void>}
+ */
+export async function setFileTags(fileId, tags) {
+  const fileDoc = doc(db, 'files', fileId);
+  await setDoc(fileDoc, { tags }, { merge: true });
+}
+
+/**
+ * Gets tags metadata for a file from Firestore.
+ * @param {string} fileId - Unique file ID or Firestore doc ID
+ * @returns {Promise<Object>} key-value map
+ */
+export async function getFileTags(fileId) {
+  const fileDoc = doc(db, 'files', fileId);
+  const snap = await getDoc(fileDoc);
+  return snap.exists() && snap.data().tags ? snap.data().tags : {};
+}
+
+/**
+ * Updates tags metadata for a file in Firestore.
+ * @param {string} fileId - Unique file ID or Firestore doc ID
+ * @param {Object} tags - Key-value map
+ * @returns {Promise<void>}
+ */
+export async function updateFileTags(fileId, tags) {
+  const fileDoc = doc(db, 'files', fileId);
+  await updateDoc(fileDoc, { tags });
+}
+
+/**
+ * Resolves a file document by its Storage fullPath.
+ * @param {string} fullPath
+ * @returns {Promise<{id: string, data: any} | null>}
+ */
+export async function getFileDocByFullPath(fullPath) {
+  if (!fullPath) return null;
+  const q = query(collection(db, 'files'), where('fullPath', '==', fullPath), limit(1));
+  const snap = await getDocs(q);
+  if (snap.empty) return null;
+  const d = snap.docs[0];
+  return { id: d.id, data: d.data() };
+}
+
+/**
+ * Gets tags using a file's fullPath.
+ * @param {string} fullPath
+ * @returns {Promise<Object>} key-value map
+ */
+export async function getFileTagsByFullPath(fullPath) {
+  const d = await getFileDocByFullPath(fullPath);
+  if (!d) return {};
+  const tags = (d.data && typeof d.data.tags === 'object' && !Array.isArray(d.data.tags)) ? d.data.tags : {};
+  return tags;
+}
+
+/**
+ * Updates tags using a file's fullPath.
+ * @param {string} fullPath
+ * @param {Object} tags - Key-value map
+ */
+export async function updateFileTagsByFullPath(fullPath, tags) {
+  const d = await getFileDocByFullPath(fullPath);
+  if (!d) throw new Error('No metadata document found for this file');
+  await updateDoc(doc(db, 'files', d.id), { tags });
 }
 
 /**

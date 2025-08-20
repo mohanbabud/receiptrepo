@@ -158,22 +158,23 @@
 .progress-bar {
   flex: 1;
   height: 8px;
-  background-color: #e9ecef;
+  background-color: var(--gray-200);
   border-radius: 4px;
   overflow: hidden;
   position: relative;
+  border: 1px solid #000;
 }
 
 .progress-fill {
   height: 100%;
-  background: #22c55e;
+  background: var(--success-color);
   transition: width 0.3s ease;
   border-radius: 4px;
 }
 
 .progress-text {
   font-weight: 600;
-  color: #28a745;
+  color: var(--success-color);
   min-width: 45px;
   text-align: right;
   font-size: 0.85rem;

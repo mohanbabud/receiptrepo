@@ -1,4 +1,5 @@
 /* Kill-switch service worker to remove any previously installed SW and clear caches */
+/* version: 2025-08-13T1 */
 self.addEventListener('install', (event) => {
   // Activate immediately
   self.skipWaiting();

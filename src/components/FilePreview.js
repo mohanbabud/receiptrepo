@@ -1,9 +1,19 @@
 /* eslint-disable react-hooks/rules-of-hooks */
 import React, { useEffect, useState, useMemo } from 'react';
-import { deleteObject, ref, getDownloadURL, getMetadata } from 'firebase/storage';
+import PdfFlipbook from './PdfFlipbook';
+import PdfPlainViewer from './PdfPlainViewer';
+import { deleteObject, ref, getDownloadURL, getMetadata, uploadBytes } from 'firebase/storage';
 import { doc, deleteDoc, addDoc, collection, updateDoc } from 'firebase/firestore';
 import { storage, db } from '../firebase';
-import { FaTimes, FaDownload, FaTrash, FaEdit, FaExpand, FaCompress } from 'react-icons/fa';
+import { 
+  FaTimesCircle,
+  FaCloudDownloadAlt,
+  FaTrashAlt,
+  FaPen,
+  FaExpandArrowsAlt,
+  FaCompressArrowsAlt,
+  FaCompressAlt
+} from 'react-icons/fa';
 import './FilePreview.css';
 
 const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
@@ -14,6 +24,9 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
   const [textPreview, setTextPreview] = useState(null);
   const [imageFit, setImageFit] = useState('contain'); // 'contain' | 'cover'
   const isPlaceholder = file.name === '.folder-placeholder' || file.name === '.folder_placeholder' || file.name === '.keep';
+  // Flipbook state for PDFs
+  const [useFlipbook, setUseFlipbook] = useState(false);
+  
 
   // Helper: infer MIME from filename when metadata is missing or generic
   const inferMimeFromName = (name = '') => {
@@ -115,30 +128,65 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
     if (url) window.open(url, '_blank');
   };
 
+  // Lossless optimize: copy pages and clear non-essential metadata; do not rasterize.
+  const handleOptimizePdfLossless = async () => {
+    if (userRole !== 'admin') return;
+    try {
+      setLoading(true);
+      const url = details.url || file.downloadURL;
+      const fullPath = details.fullPath || file.fullPath || file?.ref?.fullPath;
+      if (!url || !fullPath) throw new Error('Missing file URL or path');
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('Failed to fetch original PDF');
+      const origBlob = await res.blob();
+
+      const { PDFDocument } = await import('pdf-lib');
+      const src = await PDFDocument.load(await origBlob.arrayBuffer());
+      const dst = await PDFDocument.create();
+      const pages = await dst.copyPages(src, src.getPageIndices());
+      pages.forEach(p => dst.addPage(p));
+      try { dst.setTitle(''); dst.setAuthor(''); dst.setSubject(''); dst.setKeywords([]); dst.setProducer(''); dst.setCreator(''); } catch (_) {}
+      const newBytes = await dst.save();
+      const newBlob = new Blob([new Uint8Array(newBytes)], { type: 'application/pdf' });
+
+      if (newBlob.size >= origBlob.size) {
+        window.dispatchEvent(new CustomEvent('file-action-success', { detail: { message: 'No lossless size improvement found' } }));
+        return;
+      }
+
+      const fileRef = ref(storage, fullPath);
+      await uploadBytes(fileRef, newBlob, { contentType: 'application/pdf' });
+      const [meta, newUrl] = await Promise.all([
+        (async () => { try { return await getMetadata(fileRef); } catch { return null; } })(),
+        (async () => { try { return await getDownloadURL(fileRef); } catch { return null; } })()
+      ]);
+      setDetails((d) => ({
+        ...d,
+        url: newUrl || d.url,
+        size: typeof meta?.size === 'number' ? meta.size : d.size,
+        uploadedAt: meta?.updated ? new Date(meta.updated) : d.uploadedAt
+      }));
+      if (file.id) {
+        try {
+          await updateDoc(doc(db, 'files', file.id), {
+            size: typeof meta?.size === 'number' ? meta.size : newBlob.size,
+            downloadURL: newUrl || url,
+            updatedAt: new Date()
+          });
+        } catch (_) {}
+      }
+      window.dispatchEvent(new CustomEvent('file-action-success', { detail: { message: 'PDF optimized losslessly' } }));
+    } catch (e) {
+      console.error('Lossless optimize error:', e);
+      alert('Failed to optimize PDF');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleDelete = async () => {
     if (userRole === 'viewer') {
       alert('You do not have permission to delete files');
-      return;
-    }
-
-    if (userRole === 'user') {
-      // Create delete request for admin approval
-      try {
-        await addDoc(collection(db, 'requests'), {
-          type: 'delete',
-          fileId: file.id,
-          fileName: file.name,
-          filePath: file.path,
-          requestedBy: userId,
-          requestedAt: new Date(),
-          status: 'pending'
-        });
-        alert('Delete request submitted for admin approval');
-        onClose();
-      } catch (error) {
-        console.error('Error submitting delete request:', error);
-        alert('Error submitting delete request');
-      }
       return;
     }
 
@@ -179,6 +227,14 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
         try {
           const msg = `"${file.name}" deleted successfully!`;
           window.dispatchEvent(new CustomEvent('file-action-success', { detail: { message: msg } }));
+          // Also broadcast a storage-meta-refresh for the parent folder so any open views reload
+          const parent = (() => {
+            const fp = (details?.fullPath || file.fullPath || file?.ref?.fullPath || '').replace(/^\/+/, '');
+            if (!fp || fp === 'files' || fp === 'files/') return 'files/';
+            const parentPath = fp.substring(0, fp.lastIndexOf('/') + 1);
+            return parentPath || 'files/';
+          })();
+          window.dispatchEvent(new CustomEvent('storage-meta-refresh', { detail: { prefix: parent } }));
         } catch (_) {}
         onFileAction();
         onClose();
@@ -250,13 +306,22 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
     }
     // PDFs
     if (t === 'application/pdf') {
+      if (useFlipbook) {
+        return (
+          <div className="pdf-preview" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center' }}>
+              <button className="action-btn" onClick={() => setUseFlipbook(false)}>Switch to simple viewer</button>
+            </div>
+            <PdfFlipbook url={details.url} height={600} />
+          </div>
+        );
+      }
       return (
-        <div className="pdf-preview">
-          {details.url ? (
-            <iframe title={file.name} src={`${details.url}#toolbar=0&navpanes=0`} />
-          ) : (
-            <div style={{ padding: 12, color: '#666' }}>Fetching preview…</div>
-          )}
+        <div className="pdf-preview" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center' }}>
+            <button className="action-btn" onClick={() => setUseFlipbook(true)}>Switch to flipbook</button>
+          </div>
+          <PdfPlainViewer url={details.url} height={600} />
         </div>
       );
     }
@@ -340,11 +405,17 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
                   className="action-btn"
                   title={imageFit === 'contain' ? 'Switch to Fill (cover)' : 'Switch to Fit (contain)'}
                 >
-                  {imageFit === 'contain' ? <FaExpand /> : <FaCompress />}
+                  {imageFit === 'contain' ? <FaExpandArrowsAlt /> : <FaCompressArrowsAlt />}
+                </button>
+              )}
+              {/* Admin-only: Lossless PDF optimize */}
+              {userRole === 'admin' && String(effectiveType || '').toLowerCase() === 'application/pdf' && (
+                <button onClick={handleOptimizePdfLossless} className="action-btn" title="Optimize PDF (lossless)" disabled={loading}>
+                  <FaCompressAlt />
                 </button>
               )}
               <button onClick={handleDownload} className="action-btn download" title="Download">
-                <FaDownload />
+                <FaCloudDownloadAlt />
               </button>
               {userRole !== 'viewer' && !isRenaming && (
                 <button 
@@ -353,7 +424,7 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
                   title="Rename"
                   disabled={loading}
                 >
-                  <FaEdit />
+                  <FaPen />
                 </button>
               )}
               {userRole === 'admin' && !isRenaming && (
@@ -363,15 +434,16 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
                   title="Delete"
                   disabled={loading}
                 >
-                  <FaTrash />
+                  <FaTrashAlt />
                 </button>
               )}
               <button onClick={onClose} className="action-btn close" title="Close">
-                <FaTimes />
+                <FaTimesCircle />
               </button>
             </div>
           </div>
-          <div className="preview-content">
+            {/* Tags moved to Dashboard file listing */}
+            <div className="preview-content">
             {renderPreview()}
           </div>
           <div className="preview-footer">

@@ -25,11 +25,15 @@ service cloud.firestore {
     // Files collection - role-based access
     match /files/{fileId} {
       allow read: if request.auth != null;
-      allow create: if request.auth != null && 
-  exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-  get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['user', 'admin'];
-      allow update, delete: if request.auth != null && 
-  isAdmin(request.auth.uid);
+      allow create: if request.auth != null &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['user', 'admin'];
+      // Allow admins to update/delete any file
+      allow update, delete: if request.auth != null && isAdmin(request.auth.uid);
+  // Allow owners to update tags only (other fields must remain unchanged)
+      allow update: if request.auth != null &&
+        resource.data.uploadedByUid == request.auth.uid &&
+        request.resource.data.diff(resource.data).changedKeys().hasOnly(['tags']);
     }
     
     // Requests collection - users can create and read their own, admins can read/update all

@@ -1,8 +1,7 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { ref, uploadString } from 'firebase/storage';
 import { signOut } from 'firebase/auth';
 import { Link } from 'react-router-dom';
-import { auth, storage } from '../firebase';
+import { auth } from '../firebase';
 import FolderTree from './FolderTree';
 import FileUploader from './FileUploader';
 import FilePreview from './FilePreview';
@@ -33,13 +32,10 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
   const [previewWidth, setPreviewWidth] = useState(0); // px, measured for right panel
   const PREVIEW_MIN = 320;
   const PREVIEW_MAX_HARD = 720;
-  // Toggle to show/hide folders in the Files section
-  // Default ON for 'user' and 'admin', OFF for 'viewer'
-  const [showFolders, setShowFolders] = useState(userRole !== 'viewer');
-
-  useEffect(() => {
-    setShowFolders(userRole !== 'viewer');
-  }, [userRole]);
+  // Toggle to show/hide folders in the Files section (read-only users still need to see folders)
+  // Default ON for all roles so viewers can browse folder hierarchy.
+  const [showFolders, setShowFolders] = useState(true);
+  // (Removed effect that previously hid folders for viewer role.)
   // removed unused previewBackdropVisible state
 
   const handleLogout = async () => {
@@ -67,26 +63,7 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
 
   // Removed top-level header create-folder; Files section has its own subfolder action
 
-  const handleUploadFiles = () => {
-    setCollapseUploader(false);
-  };
-
-  const handleCreateSubfolder = useCallback(async () => {
-    if (userRole === 'viewer') return;
-    const name = prompt('Enter subfolder name:');
-    if (!name || !name.trim()) return;
-    try {
-      let base = currentPath || '/files/';
-      if (!base.endsWith('/')) base += '/';
-      const fullPath = `${base}${name.trim().replace(/^\/+|\/+$/g, '')}/.keep`.replace(/^\/+/, '');
-  const keepRef = ref(storage, fullPath.replace(/^\/+/, ''));
-  // Use a tiny non-empty payload for consistency in listings
-  await uploadString(keepRef, 'keep', 'raw', { contentType: 'text/plain' });
-      refreshFiles();
-    } catch (e) {
-      alert('Failed to create subfolder: ' + (e?.message || e));
-    }
-  }, [currentPath, userRole]);
+  // Removed: header-level Upload/Create actions; use the Upload panel and FolderTree controls instead
 
   const onBannerDrop = useCallback((e) => {
     e.preventDefault();
@@ -229,6 +206,18 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
     }
   }, [clampPreviewWidth]);
 
+  // Jump to a path requested by TagSearchPage
+  useEffect(() => {
+    try {
+      const key = 'jumpToPath';
+      const v = localStorage.getItem(key);
+      if (v && typeof v === 'string') {
+        localStorage.removeItem(key);
+        if (v.startsWith('/files/')) setCurrentPath(v);
+      }
+    } catch {}
+  }, []);
+
   return (
     <div className="dashboard">
   <a href="#main-content" className="skip-link">Skip to content</a>
@@ -258,7 +247,42 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
             <AccentToggle accent={accent} setAccent={setAccent} />
             <PresetToggle preset={preset} setPreset={setPreset} />
             <StatusBar />
+            <Link to="/search" className="admin-link" title="Open Receipt Search">🔎 Search</Link>
           </div>
+          {userRole === 'viewer' && (
+            <button
+              onClick={async () => {
+                try {
+                  // Prevent duplicate requests by checking localStorage flag quickly (optimistic)
+                  const flagKey = 'upgradeRequested:' + (user?.uid || '');
+                  if (localStorage.getItem(flagKey)) {
+                    alert('Upgrade request already submitted.');
+                    return;
+                  }
+                  const { collection, addDoc, serverTimestamp } = await import('firebase/firestore');
+                  // Firestore dynamic import not needed for doc/collection (already imported in other files) but ensure safety
+                  const { db } = await import('../firebase');
+                  // Add a request document
+                  await addDoc(collection(db, 'requests'), {
+                    type: 'role-upgrade',
+                    requestedBy: user.uid,
+                    requestedEmail: user.email,
+                    requestedAt: serverTimestamp(),
+                    status: 'pending',
+                    fromRole: 'viewer',
+                    desiredRole: 'user'
+                  });
+                  localStorage.setItem(flagKey, '1');
+                  alert('Upgrade request submitted. An admin will review it.');
+                } catch (e) {
+                  console.error('Upgrade request error', e);
+                  alert('Failed to submit upgrade request.');
+                }
+              }}
+              className="logout-btn"
+              style={{ background: '#2563eb' }}
+            >Request Upload Access</button>
+          )}
           <button onClick={() => setShowChangePw(true)} className="logout-btn">Change Password</button>
           {userRole === 'admin' && (
             <Link to="/admin" className="admin-link">Admin Panel</Link>
@@ -320,13 +344,13 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
                       onChange={(e) => setShowFolders(e.target.checked)}
                       aria-label="Show folders in Files view"
                     />
-                    <span>Show folders</span>
+                    <span>Show Folders</span>
                   </label>
                   {userRole !== 'viewer' && (
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto' }}>
-                      <button className="action-btn upload-files" onClick={handleUploadFiles}>📤 Upload Files</button>
-                      <button className="action-btn create-folder" onClick={handleCreateSubfolder}>📁 Create subfolder</button>
-                      <button className="action-btn refresh-all" onClick={() => setRefreshTrigger(prev => prev + 1)}>🔄 Refresh</button>
+                      <button className="action-btn upload-files" onClick={() => setCollapseUploader(v => !v)}>
+                        {collapseUploader ? '📤 Upload Files' : '▲ Close Upload'}
+                      </button>
                     </div>
                   )}
                 </div>
@@ -337,29 +361,7 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
                 onDragEnter={userRole !== 'viewer' ? onBannerDrag : undefined}
                 onDrop={userRole !== 'viewer' ? onBannerDrop : undefined}
               >
-                {/* Drop banner for filesOnly context */}
-                {userRole !== 'viewer' && (
-                  <div
-                    onDragOver={onBannerDrag}
-                    onDragEnter={onBannerDrag}
-                    onDrop={onBannerDrop}
-                    style={{
-                      marginBottom: 10,
-                      padding: '10px 12px',
-                      border: '1px dashed var(--primary, #3b82f6)',
-                      borderRadius: 8,
-                      background: '#f8fafc',
-                      color: '#334155',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      gap: 12
-                    }}
-                    title="Drop files here to upload to the selected folder"
-                  >
-                    <span>📥 Drop here to upload to this folder</span>
-                  </div>
-                )}
+                {/* Removed secondary drop banner to avoid duplicate upload entry points */}
                 <FolderTree
                   currentPath={currentPath}
                   onPathChange={setCurrentPath}
@@ -368,16 +370,9 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
                   onFileSelect={handleFileSelect}
                   filesOnly={!showFolders}
                 />
-                {userRole !== 'viewer' && (
+                {userRole !== 'viewer' && !collapseUploader && (
                   <div style={{ marginTop: 12 }} ref={uploaderPanelRef}>
-                    <button className="action-btn" onClick={() => setCollapseUploader(v => !v)}>
-                      {collapseUploader ? '▼' : '▲'} Upload panel
-                    </button>
-                    {!collapseUploader && (
-                      <div style={{ marginTop: 8 }}>
-                        <FileUploader currentPath={currentPath} onUploadComplete={() => { setDroppedFiles([]); refreshFiles(); }} userRole={userRole} seedFiles={droppedFiles} />
-                      </div>
-                    )}
+                    <FileUploader currentPath={currentPath} onUploadComplete={() => { setDroppedFiles([]); refreshFiles(); }} userRole={userRole} seedFiles={droppedFiles} />
                   </div>
                 )}
               </div>

@@ -176,6 +176,99 @@ exports.adminSetUserPassword = functions.https.onCall(async (data, context) => {
 //   prefix (string, default 'files/'), limit (number), dryRun (bool), mode ('lossless'|'balanced'), overwrite (bool)
 const sharp = require('sharp');
 
+// Lossless JPEG optimizer: strips non-essential metadata (COM, XMP/APP1 non-EXIF, APP13)
+// and preserves EXIF (e.g., orientation) without re-encoding pixel data.
+// Returns a Buffer. If parsing fails, returns the original buffer.
+function stripJpegMetadataLosslessBuffer(inputBuf) {
+  try {
+    if (!Buffer.isBuffer(inputBuf) || inputBuf.length < 4) return inputBuf;
+    const buf = inputBuf;
+    if (buf[0] !== 0xFF || buf[1] !== 0xD8) return inputBuf; // Not JPEG SOI
+
+    const chunks = [];
+    // Write SOI
+    chunks.push(Buffer.from([0xFF, 0xD8]));
+    let i = 2;
+    while (i + 3 < buf.length) {
+      if (buf[i] !== 0xFF) {
+        // Unexpected; bail out
+        return inputBuf;
+      }
+      let marker = buf[i + 1];
+      // Skip fill 0xFFs
+      while (marker === 0xFF && i + 2 < buf.length) {
+        i += 1;
+        marker = buf[i + 1];
+      }
+
+      // EOI
+      if (marker === 0xD9) {
+        chunks.push(Buffer.from([0xFF, 0xD9]));
+        i += 2;
+        break;
+      }
+
+      // SOS: copy header + rest of file as-is
+      if (marker === 0xDA) {
+        if (i + 3 >= buf.length) return inputBuf;
+        const len = (buf[i + 2] << 8) | buf[i + 3];
+        const segEnd = i + 2 + len;
+        if (segEnd > buf.length) return inputBuf;
+        chunks.push(buf.subarray(i, segEnd));
+        // Copy the remainder (scan data + EOI)
+        chunks.push(buf.subarray(segEnd));
+        return Buffer.concat(chunks);
+      }
+
+      if (i + 3 >= buf.length) return inputBuf;
+      const len = (buf[i + 2] << 8) | buf[i + 3];
+      const segEnd = i + 2 + len;
+      if (len < 2 || segEnd > buf.length) return inputBuf; // malformed
+
+      const isCOM = marker === 0xFE; // Comment
+      const isAPP1 = marker === 0xE1; // APP1 (Exif or XMP)
+      const isAPP13 = marker === 0xED; // APP13 (Photoshop IRB)
+      let strip = false;
+
+      if (isCOM) {
+        strip = true;
+      } else if (isAPP13) {
+        strip = true;
+      } else if (isAPP1) {
+        // Inspect payload to decide EXIF vs XMP
+        const payloadStart = i + 4;
+        const payloadLen = len - 2;
+        if (payloadLen > 0 && payloadStart + payloadLen <= buf.length) {
+          const isExif = payloadLen >= 6 &&
+            buf[payloadStart + 0] === 0x45 && // E
+            buf[payloadStart + 1] === 0x78 && // x
+            buf[payloadStart + 2] === 0x69 && // i
+            buf[payloadStart + 3] === 0x66 && // f
+            buf[payloadStart + 4] === 0x00 &&
+            buf[payloadStart + 5] === 0x00;
+          if (isExif) {
+            strip = false; // keep EXIF
+          } else {
+            const needle = Buffer.from('http://ns.adobe.com/xap/1.0/');
+            const seg = buf.subarray(payloadStart, payloadStart + Math.min(payloadLen, needle.length));
+            strip = seg.equals(needle.subarray(0, seg.length)); // strip XMP
+          }
+        }
+      }
+
+      if (!strip) {
+        chunks.push(buf.subarray(i, segEnd));
+      }
+      i = segEnd;
+    }
+    // If we get here without hitting SOS, return original
+    return inputBuf;
+  } catch (e) {
+    console.warn('stripJpegMetadataLosslessBuffer failed:', e?.message || e);
+    return inputBuf;
+  }
+}
+
 exports.optimizeExistingImages = functions
   .runWith({ timeoutSeconds: 540, memory: '1GB' })
   .https.onCall(async (data, context) => {
@@ -188,7 +281,11 @@ exports.optimizeExistingImages = functions
       throw new functions.https.HttpsError('permission-denied', 'Only admin can run backfill');
     }
 
-    const prefix = (data && typeof data.prefix === 'string' ? data.prefix : 'files/').replace(/^\/+/, '');
+    const prefix = (data && typeof data.prefix === 'string' ? data.prefix : 'files/')
+      .toString()
+      .trim()
+      .replace(/\\/g, '/')
+      .replace(/^\/+/, '');
     const limit = Math.max(0, Math.floor(data && data.limit ? data.limit : 50));
     const dryRun = !!(data && data.dryRun);
     const overwrite = !!(data && data.overwrite);
@@ -216,15 +313,15 @@ exports.optimizeExistingImages = functions
     };
 
     const optimizeBuffer = async (inputBuf) => {
-      const image = sharp(inputBuf, { failOn: 'none' }).rotate();
       if (mode === 'balanced') {
+        const image = sharp(inputBuf, { failOn: 'none' }).rotate();
         return image
           .resize({ width: 2000, height: 2000, fit: 'inside', withoutEnlargement: true })
           .jpeg({ quality: 85, mozjpeg: true, chromaSubsampling: '4:4:4' })
           .toBuffer();
       }
-      // lossless-ish: strip metadata, keep orientation, max quality
-      return image.jpeg({ quality: 100, mozjpeg: true, chromaSubsampling: '4:4:4' }).toBuffer();
+      // True lossless: strip metadata without re-encoding
+      return stripJpegMetadataLosslessBuffer(inputBuf);
     };
 
     outer: while (true) {
@@ -252,7 +349,10 @@ exports.optimizeExistingImages = functions
         savedBytes += delta > 0 ? delta : 0;
         details.push({ path: file.name, before: beforeSize, after: afterSize, saved: delta });
 
-        if (!dryRun) {
+  // Only write back if we actually saved a meaningful number of bytes
+  const minGain = 1024; // 1KB threshold to avoid churn from tiny differences
+  const shouldWrite = !dryRun && (beforeSize > 0) && (afterSize + minGain < beforeSize);
+        if (shouldWrite) {
           // Overwrite object with optimized JPEG, set metadata flag
           await file.save(optimizedBuf, {
             contentType: 'image/jpeg',
@@ -260,6 +360,24 @@ exports.optimizeExistingImages = functions
             resumable: false,
             validation: false
           });
+          // Also update Firestore metadata doc(s) if present so UI shows new size
+          try {
+            const q = await db.collection('files').where('fullPath', '==', file.name).get();
+            if (!q.empty) {
+              const payload = {
+                size: afterSize,
+                type: 'image/jpeg',
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                optimized: mode,
+                optimizedAt: admin.firestore.FieldValue.serverTimestamp(),
+              };
+              const batch = db.batch();
+              q.forEach((docSnap) => batch.set(docSnap.ref, payload, { merge: true }));
+              await batch.commit();
+            }
+          } catch (e) {
+            console.warn('Failed to update Firestore size for', file.name, e.message || e);
+          }
         }
         processed++;
       }
@@ -282,3 +400,58 @@ exports.optimizeExistingImages = functions
       details
     };
   });
+
+// Optimize JPEGs on upload automatically. Skips if already optimized or not image/jpeg.
+exports.optimizeOnUpload = functions.storage.object().onFinalize(async (object) => {
+  try {
+    const { name: fullPath, contentType, bucket } = object || {};
+    if (!fullPath || !contentType) return;
+    // Only JPEGs (by ext or content type)
+    const lower = fullPath.toLowerCase();
+    const looksJpeg = lower.endsWith('.jpg') || lower.endsWith('.jpeg');
+    const isJpegCT = typeof contentType === 'string' && contentType.startsWith('image/jpeg');
+    if (!(looksJpeg || isJpegCT)) return;
+
+  const md = (object && object.metadata) || {};
+  if (md.optimized) return; // avoid reprocessing loop
+  // Require explicit opt-in flag from uploader to run optimization
+  if (!md.autoOptimize || md.autoOptimize !== '1') return;
+
+    const gcs = storage.bucket(bucket).file(fullPath);
+    // Download
+    const [buf] = await gcs.download();
+    // Lossless by default: strip metadata only
+    const optimizedBuf = stripJpegMetadataLosslessBuffer(buf);
+
+    // Skip if no meaningful gain
+    const minGain = 1024;
+    if (!(buf.length > 0 && optimizedBuf.length + minGain < buf.length)) {
+      return;
+    }
+
+    // Save back with optimized metadata flag
+    await gcs.save(optimizedBuf, {
+      contentType: 'image/jpeg',
+      metadata: { metadata: { optimized: 'lossless', optimizedAt: new Date().toISOString() } },
+      resumable: false,
+      validation: false,
+    });
+
+    // Update Firestore size/type for corresponding file doc(s)
+    const q = await db.collection('files').where('fullPath', '==', fullPath).get();
+    if (!q.empty) {
+      const payload = {
+        size: optimizedBuf.length,
+        type: 'image/jpeg',
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        optimized: 'lossless',
+        optimizedAt: admin.firestore.FieldValue.serverTimestamp(),
+      };
+      const batch = db.batch();
+      q.forEach((docSnap) => batch.set(docSnap.ref, payload, { merge: true }));
+      await batch.commit();
+    }
+  } catch (err) {
+    console.error('optimizeOnUpload error:', err);
+  }
+});
