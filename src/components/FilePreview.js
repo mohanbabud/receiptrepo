@@ -2,7 +2,6 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import PdfFlipbook from './PdfFlipbook';
 import PdfPlainViewer from './PdfPlainViewer';
-import { getFileTags, updateFileTags, getFileTagsByFullPath, updateFileTagsByFullPath } from '../firebaseStorageManager';
 import { deleteObject, ref, getDownloadURL, getMetadata, uploadBytes } from 'firebase/storage';
 import { doc, deleteDoc, addDoc, collection, updateDoc } from 'firebase/firestore';
 import { storage, db } from '../firebase';
@@ -26,53 +25,8 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
   const [imageFit, setImageFit] = useState('contain'); // 'contain' | 'cover'
   const isPlaceholder = file.name === '.folder-placeholder' || file.name === '.folder_placeholder' || file.name === '.keep';
   // Flipbook state for PDFs
-  const [pdfPage, setPdfPage] = useState(1);
   const [useFlipbook, setUseFlipbook] = useState(false);
-
-  // Tags state
-  const [tags, setTags] = useState({});
-  const [tagsEdit, setTagsEdit] = useState('');
-  const [editingTags, setEditingTags] = useState(false);
-
-  useEffect(() => {
-    const run = async () => {
-      try {
-        const full = file.fullPath || file?.ref?.fullPath;
-        if (full) {
-          const t = await getFileTagsByFullPath(full);
-          setTags(t);
-          return;
-        }
-        if (file.id) {
-          const t = await getFileTags(file.id);
-          setTags(t);
-        }
-      } catch (_) {}
-    };
-    run();
-  }, [file.id, file.fullPath, file?.ref?.fullPath]);
-
-  const handleTagsSave = async () => {
-    const newTags = (() => {
-      const out = {};
-      for (const pair of tagsEdit.split(',').map(s => s.trim()).filter(Boolean)) {
-        const eq = pair.indexOf('=');
-        if (eq > 0) {
-          const k = pair.slice(0, eq).trim();
-          const v = pair.slice(eq + 1).trim();
-          if (k) out[k] = v;
-        } else {
-          out[pair] = '';
-        }
-      }
-      return out;
-    })();
-    const full = file.fullPath || file?.ref?.fullPath;
-    if (full) await updateFileTagsByFullPath(full, newTags);
-    else await updateFileTags(file.id, newTags);
-    setTags(newTags);
-    setEditingTags(false);
-  };
+  
 
   // Helper: infer MIME from filename when metadata is missing or generic
   const inferMimeFromName = (name = '') => {

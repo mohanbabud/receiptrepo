@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { ref, uploadBytesResumable, getDownloadURL, getMetadata } from 'firebase/storage';
 import { collection, addDoc, getDoc, doc, setDoc } from 'firebase/firestore';
@@ -19,7 +19,7 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
   const [compressPdf, setCompressPdf] = useState(false); // lossless PDF optimize
   const folderInputRef = useRef(null);
   const cameraInputRef = useRef(null);
-  const seededOnceRef = useRef(0);
+  // const seededOnceRef = useRef(0);
 
   // Tags state (applied to all uploaded files in this batch)
   const [tagsRows, setTagsRows] = useState(DEFAULT_TAG_KEYS.map(k => ({ key: k, value: '' })));
@@ -178,28 +178,6 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
     }
   }, []);
 
-  // Removed lossy downscale path for strict lossless-only policy.
-
-  const preprocessFiles = useCallback(async (files) => {
-    const out = [];
-    for (const f of files) {
-      const isPdf = f.type === 'application/pdf' || /\.pdf$/i.test(f.name || '');
-      if (isPdf && compressPdf) {
-        out.push(await optimizePdfLossless(f));
-        continue;
-      }
-      const isJpeg = f.type === 'image/jpeg' || /\.jpe?g$/i.test(f.name || '');
-      if (isJpeg) {
-    if (optMode === 'off') out.push(f);
-    else out.push(await stripJpegMetadataLossless(f));
-      } else {
-        // Leave non-JPEG images untouched
-        out.push(f);
-      }
-    }
-    return out;
-  }, [stripJpegMetadataLossless, optMode, compressPdf]);
-
   // Lossless PDF optimization: reload and re-save pages without re-encoding images.
   const optimizePdfLossless = useCallback(async (file) => {
     try {
@@ -218,6 +196,28 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
       return file;
     }
   }, []);
+
+  // Removed lossy downscale path for strict lossless-only policy.
+
+  const preprocessFiles = useCallback(async (files) => {
+    const out = [];
+    for (const f of files) {
+      const isPdf = f.type === 'application/pdf' || /\.pdf$/i.test(f.name || '');
+      if (isPdf && compressPdf) {
+        out.push(await optimizePdfLossless(f));
+        continue;
+      }
+      const isJpeg = f.type === 'image/jpeg' || /\.jpe?g$/i.test(f.name || '');
+      if (isJpeg) {
+        if (optMode === 'off') out.push(f);
+        else out.push(await stripJpegMetadataLossless(f));
+      } else {
+        // Leave non-JPEG images untouched
+        out.push(f);
+      }
+    }
+    return out;
+  }, [stripJpegMetadataLossless, optMode, compressPdf, optimizePdfLossless]);
 
   const performUploads = useCallback(async (acceptedFilesRaw) => {
     if (userRole === 'viewer') {
@@ -354,7 +354,7 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
   } finally {
     setUploading(false);
   }
-  }, [currentPath, onUploadComplete, userRole, preprocessFiles, ensureUserProfile]);
+  }, [currentPath, onUploadComplete, userRole, preprocessFiles, ensureUserProfile, buildTagsMap, tagsRows, optMode, compressPdf]);
 
   const { getRootProps, getInputProps, isDragActive, isDragReject, open } = useDropzone({
     onDrop: performUploads,

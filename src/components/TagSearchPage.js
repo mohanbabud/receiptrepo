@@ -20,12 +20,6 @@ function SearchableComboBox({ options, value, onChange, placeholder = 'Select…
   const typedRef = useRef(false);
 
   useEffect(() => {
-    // Keep input text in sync with selected item when value/options change
-    const current = (options || []).find(o => o.value === value) || null;
-    setQuery(current ? (current.label ?? current.value ?? '') : '');
-  }, [value, options]);
-
-  useEffect(() => {
     const onDoc = (e) => {
       if (!containerRef.current) return;
       if (!containerRef.current.contains(e.target)) setOpen(false);
@@ -98,9 +92,11 @@ function SearchableComboBox({ options, value, onChange, placeholder = 'Select…
         }}
         onKeyDown={onKeyDown}
         aria-expanded={open}
+  aria-haspopup="listbox"
         aria-autocomplete="list"
         role="combobox"
         aria-controls={listId}
+  aria-activedescendant={open && filtered.length ? `${listId}-opt-${highlight}` : undefined}
       />
       {open && (
         <div className="combo-menu" role="listbox" id={listId}>
@@ -113,6 +109,7 @@ function SearchableComboBox({ options, value, onChange, placeholder = 'Select…
                 role="option"
                 className={`combo-option${i === highlight ? ' is-active' : ''}`}
                 aria-selected={String(o.value) === String(value)}
+    id={`${listId}-opt-${i}`}
                 onMouseEnter={() => setHighlight(i)}
                 onMouseDown={(e) => { e.preventDefault(); selectAt(i); }}
               >
@@ -124,6 +121,7 @@ function SearchableComboBox({ options, value, onChange, placeholder = 'Select…
               className="combo-option"
               role="option"
               aria-selected="false"
+        id={`${listId}-opt-custom`}
               onMouseDown={(e) => { e.preventDefault(); onChange && onChange(String(query).trim()); setOpen(false); typedRef.current = false; }}
             >
               Use “{String(query).trim()}”
