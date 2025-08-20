@@ -172,6 +172,51 @@
   color: var(--primary-color);
 }
 
+/* User menu */
+.user-menu-button {
+  background: rgba(255,255,255,0.12);
+  color: #fff;
+  border: 1px solid rgba(255,255,255,0.25);
+  border-radius: var(--radius-lg);
+  padding: 6px 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.user-menu-list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  background: #ffffff;
+  border: 1px solid var(--gray-200);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  min-width: 220px;
+  padding: 8px;
+  z-index: 2000;
+}
+
+.user-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  background: transparent;
+  border: none;
+  color: var(--gray-800);
+  font-weight: 600;
+  border-radius: var(--radius-md);
+  text-decoration: none;
+}
+
+.user-menu-item:hover {
+  background: var(--gray-100);
+}
+
+.user-menu-item.danger {
+  color: #b91c1c;
+}
+
 /* Improve badge contrast on colored header */
 .header .role-badge {
   background: rgba(255, 255, 255, 0.15);

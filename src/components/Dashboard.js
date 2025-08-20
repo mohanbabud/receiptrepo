@@ -24,6 +24,7 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [dragOverlayVisible, setDragOverlayVisible] = useState(false);
   const [showChangePw, setShowChangePw] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
   const dragCounterRef = useRef(0);
   const uploaderPanelRef = useRef(null);
   const gridRef = useRef(null);
@@ -42,6 +43,7 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
     try {
       await signOut(auth);
   setMobileMenuOpen(false);
+  setUserMenuOpen(false);
     } catch (error) {
       console.error('Error signing out:', error);
     }
@@ -218,6 +220,22 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
     } catch {}
   }, []);
 
+  // Close user menu on outside click/escape
+  useEffect(() => {
+    if (!userMenuOpen) return;
+    const onKey = (e) => { if (e.key === 'Escape') setUserMenuOpen(false); };
+    const onClick = (e) => {
+      const el = document.querySelector('.user-menu');
+      if (el && !el.contains(e.target)) setUserMenuOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('click', onClick);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('click', onClick);
+    };
+  }, [userMenuOpen]);
+
   return (
     <div className="dashboard">
   <a href="#main-content" className="skip-link">Skip to content</a>
@@ -248,6 +266,27 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
             <PresetToggle preset={preset} setPreset={setPreset} />
             <StatusBar />
             <Link to="/search" className="admin-link" title="Open Receipt Search">🔎 Search</Link>
+            {/* Compact user menu on the far right */}
+            <div className="user-menu" style={{ position: 'relative' }}>
+              <button
+                className="user-menu-button"
+                aria-haspopup="menu"
+                aria-expanded={userMenuOpen}
+                onClick={() => setUserMenuOpen(v => !v)}
+                title="Account menu"
+              >
+                {user?.email || 'Account'} ▾
+              </button>
+              {userMenuOpen && (
+                <div className="user-menu-list" role="menu" aria-label="Account">
+                  {userRole === 'admin' && (
+                    <Link to="/admin" className="user-menu-item" role="menuitem" onClick={() => setUserMenuOpen(false)}>🛠️ Admin Panel</Link>
+                  )}
+                  <button className="user-menu-item" role="menuitem" onClick={() => { setShowChangePw(true); setUserMenuOpen(false); }}>🔑 Change Password</button>
+                  <button className="user-menu-item danger" role="menuitem" onClick={handleLogout}>� Logout</button>
+                </div>
+              )}
+            </div>
           </div>
           {userRole === 'viewer' && (
             <button
@@ -283,11 +322,7 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
               style={{ background: '#2563eb' }}
             >Request Upload Access</button>
           )}
-          <button onClick={() => setShowChangePw(true)} className="logout-btn">Change Password</button>
-          {userRole === 'admin' && (
-            <Link to="/admin" className="admin-link">Admin Panel</Link>
-          )}
-          <button onClick={handleLogout} className="logout-btn">Logout</button>
+          {/* Replaced with compact user menu above */}
           {/* Compact mobile menu dropdown */}
           {mobileMenuOpen && (
             <div className="mobile-menu" role="menu">
