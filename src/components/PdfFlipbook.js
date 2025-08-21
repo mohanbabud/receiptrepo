@@ -2,8 +2,8 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import HTMLFlipBook from 'react-pageflip';
 import { Document, Page, pdfjs } from 'react-pdf';
 
-// Always use the classic JS worker served from public to avoid module-worker issues
-pdfjs.GlobalWorkerOptions.workerSrc = `${process.env.PUBLIC_URL || ''}/pdf.worker.min.js`;
+// Prefer the ESM worker shipped with pdfjs-dist v5; it's copied to public/ on install
+pdfjs.GlobalWorkerOptions.workerSrc = `${process.env.PUBLIC_URL || ''}/pdf.worker.min.mjs`;
 
 const PdfFlipbook = ({ url, height = 600, rotate = 0 }) => {
   const [numPages, setNumPages] = useState(null);
