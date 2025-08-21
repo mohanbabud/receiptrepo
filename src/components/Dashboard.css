@@ -10,6 +10,10 @@
   --text-muted: #94a3b8;
   --border-radius: 10px;
   --shadow: 0 2px 8px rgba(0,0,0,0.08);
+  /* Aliases used elsewhere */
+  --primary-color: var(--primary);
+  --bg-primary: #ffffff;
+  --text-primary: var(--text-main);
   /* Added tokens used throughout */
   --gray-50: #f9fafb;
   --gray-100: #f3f4f6;
@@ -166,6 +170,12 @@
   border: 1px solid rgba(255, 255, 255, 0.25);
 }
 
+/* Ensure icons match link color inside header links */
+.header .admin-link svg,
+.header .tree-view-link svg {
+  color: currentColor;
+}
+
 .header .admin-link:hover,
 .header .tree-view-link:hover {
   background: #ffffff;
@@ -208,6 +218,14 @@
   border-radius: var(--radius-md);
   text-decoration: none;
 }
+
+/* Give icons a friendly accent color by default */
+.user-menu-item svg,
+.mobile-menu-item svg {
+  color: var(--accent);
+}
+.user-menu-item svg { margin-right: 6px; }
+.mobile-menu-item svg { margin-right: 6px; }
 
 .user-menu-item:hover {
   background: var(--gray-100);
@@ -533,6 +551,10 @@
   box-shadow: var(--shadow-sm);
 }
 
+/* Accent-colored icons on action buttons; turn white on hover */
+.action-btn svg { color: var(--accent); transition: color var(--transition-normal); }
+.action-btn:hover svg { color: #ffffff; }
+
 .action-btn:hover {
   transform: translateY(-2px);
   box-shadow: var(--shadow-md);
@@ -659,7 +681,7 @@
   align-items: center;
   gap: 12px;
 }
-.drop-overlay-icon { font-size: 28px; }
+.drop-overlay-icon { font-size: 28px; color: var(--primary-color); }
 .drop-overlay-text { font-weight: 800; color: var(--text-primary); }
 
 /* Responsive Design */

@@ -24,6 +24,14 @@
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
 }
 
+/* Movable preview window */
+.file-preview.movable {
+  cursor: default;
+}
+.file-preview.dragging {
+  cursor: grabbing;
+}
+
 .preview-header {
   display: flex;
   justify-content: space-between;
@@ -31,6 +39,7 @@
   padding: 1rem 1.5rem;
   border-bottom: 1px solid #dee2e6;
   background-color: #f8f9fa;
+  cursor: grab;
 }
 
 .file-title h2 {
@@ -93,8 +102,8 @@
   padding: 0.5rem;
   cursor: pointer;
   border-radius: 4px;
-  transition: background-color 0.2s;
-  color: #6c757d;
+  transition: background-color 0.2s, color 0.2s;
+  color: var(--primary-color);
 }
 
 .action-btn:hover {
@@ -105,21 +114,34 @@
   transform: scale(0.96);
 }
 
-.action-btn.download:hover {
+/* Default colors per action for better visual identity */
+.action-btn {
+  background: none;
+  border: none;
+  padding: 0.5rem;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background-color 0.2s, color 0.2s ease;
+  color: #6c757d; /* base fallback */
+}
+
+/* Make preview control icons colored by default (except destructive/neutral ones) */
+.preview-actions .action-btn:not(.delete):not(.rename):not(.close) {
   color: var(--primary-color);
 }
 
-.action-btn.rename:hover {
-  color: #b45309;
-}
+/* Specific semantic colors */
+.action-btn.delete { color: #ef4444; }   /* red-500 */
+.action-btn.rename { color: #b45309; }   /* amber-700 */
+.action-btn.close  { color: #374151; }   /* gray-700 */
 
-.action-btn.delete:hover {
-  color: #b91c1c;
-}
+.action-btn.download:hover { color: var(--primary-color); }
 
-.action-btn.close:hover {
-  color: #343a40;
-}
+.action-btn.rename:hover { color: #92400e; }
+
+.action-btn.delete:hover { color: #991b1b; }
+
+.action-btn.close:hover { color: #111827; }
 
 .action-btn:disabled {
   opacity: 0.5;
@@ -154,6 +176,7 @@
   height: auto;
   object-fit: contain;
   object-position: top center;
+  transition: transform 0.2s ease;
 }
 
 /* Fit/Fill toggle support */

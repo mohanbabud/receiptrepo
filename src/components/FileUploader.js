@@ -15,8 +15,13 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
   const [uploadTasks, setUploadTasks] = useState({}); // key -> uploadTask
   const [uploadStatus, setUploadStatus] = useState({}); // key -> 'running'|'paused'|'done'|'error'|'canceled'
   // image optimization mode for JPEGs only: 'balanced' (resize+reencode), 'lossless' (strip metadata only), 'off'
-  const [optMode, setOptMode] = useState('off');
-  const [compressPdf, setCompressPdf] = useState(false); // lossless PDF optimize
+  const [optMode, setOptMode] = useState(() => {
+    try { return localStorage.getItem('uploader:optMode') || 'lossless'; } catch { return 'lossless'; }
+  });
+  const [compressPdf, setCompressPdf] = useState(() => {
+    try { return localStorage.getItem('uploader:compressPdf') === '1'; } catch { return false; }
+  }); // lossless PDF optimize
+  const [optSummary, setOptSummary] = useState('');
   const folderInputRef = useRef(null);
   const cameraInputRef = useRef(null);
   // const seededOnceRef = useRef(0);
@@ -199,25 +204,91 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
 
   // Removed lossy downscale path for strict lossless-only policy.
 
+  // Balanced JPEG optimization: optionally resize to max 2000px and re-encode ~85 quality.
+  const optimizeJpegBalanced = useCallback(async (file) => {
+    try {
+      if (!file || !(file.type === 'image/jpeg' || /\.jpe?g$/i.test(file.name || ''))) return file;
+      const MAX = 2000;
+      // Try createImageBitmap first for speed
+      let bitmap = null;
+      try { if (typeof createImageBitmap === 'function') bitmap = await createImageBitmap(file); } catch {}
+      let width, height, draw;
+      if (bitmap) {
+        width = bitmap.width; height = bitmap.height;
+        draw = (ctx, w, h) => ctx.drawImage(bitmap, 0, 0, w, h);
+      } else {
+        // Fallback to HTMLImageElement
+        const url = URL.createObjectURL(file);
+        const img = await new Promise((resolve, reject) => {
+          const im = new Image();
+          im.onload = () => resolve(im);
+          im.onerror = reject;
+          im.src = url;
+        });
+        try { URL.revokeObjectURL(url); } catch {}
+        width = img.naturalWidth || img.width; height = img.naturalHeight || img.height;
+        draw = (ctx, w, h) => ctx.drawImage(img, 0, 0, w, h);
+      }
+      if (!width || !height) return file;
+      let targetW = width, targetH = height;
+      const scale = Math.max(width / MAX, height / MAX, 1);
+      if (scale > 1) { targetW = Math.round(width / scale); targetH = Math.round(height / scale); }
+      const canvas = document.createElement('canvas');
+      canvas.width = targetW; canvas.height = targetH;
+      const ctx = canvas.getContext('2d', { alpha: false });
+      if (!ctx) return file;
+      ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+      draw(ctx, targetW, targetH);
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.85));
+      if (!blob) return file;
+      const out = new File([blob], file.name, { type: 'image/jpeg', lastModified: Date.now() });
+      const minGain = 1024; // 1KB threshold
+      return (out.size + minGain < file.size) ? out : file;
+    } catch (e) {
+      console.warn('Balanced JPEG optimize failed, using original', e);
+      return file;
+    }
+  }, []);
+
   const preprocessFiles = useCallback(async (files) => {
     const out = [];
+    let savedTotal = 0;
+    let optimizedCount = 0;
     for (const f of files) {
       const isPdf = f.type === 'application/pdf' || /\.pdf$/i.test(f.name || '');
       if (isPdf && compressPdf) {
-        out.push(await optimizePdfLossless(f));
+        const opt = await optimizePdfLossless(f);
+        if (opt && opt.size < f.size) { savedTotal += (f.size - opt.size); optimizedCount += 1; }
+        out.push(opt);
         continue;
       }
       const isJpeg = f.type === 'image/jpeg' || /\.jpe?g$/i.test(f.name || '');
       if (isJpeg) {
-        if (optMode === 'off') out.push(f);
-        else out.push(await stripJpegMetadataLossless(f));
+        if (optMode === 'off') {
+          out.push(f);
+        } else if (optMode === 'balanced') {
+          const opt = await optimizeJpegBalanced(f);
+          if (opt && opt.size < f.size) { savedTotal += (f.size - opt.size); optimizedCount += 1; }
+          out.push(opt);
+        } else { // lossless
+          const opt = await stripJpegMetadataLossless(f);
+          if (opt && opt.size < f.size) { savedTotal += (f.size - opt.size); optimizedCount += 1; }
+          out.push(opt);
+        }
       } else {
         // Leave non-JPEG images untouched
         out.push(f);
       }
     }
+    try {
+      if (savedTotal > 0) {
+        const kb = Math.round(savedTotal / 1024);
+        setOptSummary(`Optimized ${optimizedCount}/${files.length} file(s), saved ${kb} KB total`);
+        setTimeout(() => setOptSummary(''), 4000);
+      }
+    } catch {}
     return out;
-  }, [stripJpegMetadataLossless, optMode, compressPdf, optimizePdfLossless]);
+  }, [stripJpegMetadataLossless, optimizeJpegBalanced, optMode, compressPdf, optimizePdfLossless]);
 
   const performUploads = useCallback(async (acceptedFilesRaw) => {
     if (userRole === 'viewer') {
@@ -544,16 +615,20 @@ const FileUploader = ({ currentPath, onUploadComplete, userRole, seedFiles = [] 
                 <p className="or">or</p>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
                   <label htmlFor="optMode" style={{ fontSize: 12, opacity: 0.8 }}>Image optimization (opt-in):</label>
-                  <select id="optMode" value={optMode} onChange={(e) => setOptMode(e.target.value)} style={{ fontSize: 12 }}>
+                  <select id="optMode" value={optMode} onChange={(e) => { const v = e.target.value; setOptMode(v); try { localStorage.setItem('uploader:optMode', v); } catch {} }} style={{ fontSize: 12 }}>
+                    <option value="balanced">Balanced (resize ≤2000px, quality 85)</option>
                     <option value="lossless">Lossless (strip metadata only)</option>
                     <option value="off">Off</option>
                   </select>
                   <small style={{ fontSize: 11, opacity: 0.65 }}>Note: Optimization runs only when selected here.</small>
                   <label style={{ marginLeft: 12, display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
-                    <input type="checkbox" checked={compressPdf} onChange={(e) => setCompressPdf(e.target.checked)} />
+                    <input type="checkbox" checked={compressPdf} onChange={(e) => { const v = e.target.checked; setCompressPdf(v); try { localStorage.setItem('uploader:compressPdf', v ? '1' : '0'); } catch {} }} />
                     Optimize PDFs (lossless, opt-in)
                   </label>
                 </div>
+                {optSummary && (
+                  <div style={{ fontSize: 12, color: '#0f766e', background: '#ecfeff', border: '1px solid #99f6e4', padding: '6px 8px', borderRadius: 6 }}>{optSummary}</div>
+                )}
                 <button
                   type="button"
                   className="browse-btn"

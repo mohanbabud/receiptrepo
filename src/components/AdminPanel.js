@@ -15,15 +15,17 @@ import {
 } from 'firebase/firestore';
 import { deleteObject, ref, listAll, getMetadata, uploadBytes } from 'firebase/storage';
 import { sendPasswordResetEmail, createUserWithEmailAndPassword } from 'firebase/auth';
-import { db, storage, auth } from '../firebase';
+import { db, storage, auth, secondaryAuth } from '../firebase';
 import { FaArrowLeft, FaCheck, FaTimes, FaUsers, FaFileAlt, FaClock, FaKey, FaEnvelope, FaUserPlus } from 'react-icons/fa';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import AdminSetPasswordModal from './AdminSetPasswordModal';
+import AdminEditUserModal from './AdminEditUserModal';
 import './AdminPanel.css';
 
 const AdminPanel = ({ user }) => {
   const [requests, setRequests] = useState([]);
   const [users, setUsers] = useState([]);
+  const [reviews, setReviews] = useState([]);
   const [files, setFiles] = useState([]);
   const [activeTab, setActiveTab] = useState('requests');
   const [loading, setLoading] = useState(true);
@@ -41,6 +43,9 @@ const AdminPanel = ({ user }) => {
   const [addUserSuccess, setAddUserSuccess] = useState('');
   const [setPwTarget, setSetPwTarget] = useState(null);
   const [showSetPw, setShowSetPw] = useState(false);
+  const [editUserTarget, setEditUserTarget] = useState(null);
+  const [showEditUser, setShowEditUser] = useState(false);
+  const [deletingUid, setDeletingUid] = useState('');
 
   // Optimize existing images
   const [optPrefix, setOptPrefix] = useState('files/');
@@ -64,6 +69,7 @@ const AdminPanel = ({ user }) => {
   const [resyncSummary, setResyncSummary] = useState(null);
   const [showFailedDetails, setShowFailedDetails] = useState(false);
   const [resyncCleanStale, setResyncCleanStale] = useState(true);
+  // Reviews feature removed — no My reviews toggle
 
   // Normalize to files/ prefix without leading slash and ending with slash
   const toFilesPrefix = (p) => {
@@ -81,13 +87,16 @@ const AdminPanel = ({ user }) => {
     const unsubReq = onSnapshot(query(collection(db, 'requests'), orderBy('requestedAt', 'desc')), (snap) => {
       const arr = []; snap.forEach(d => arr.push({ id: d.id, ...d.data() })); setRequests(arr);
     });
+    const unsubReviews = onSnapshot(query(collection(db, 'reviews'), orderBy('requestedAt', 'desc')), (snap) => {
+      const arr = []; snap.forEach(d => arr.push({ id: d.id, ...d.data() })); setReviews(arr);
+    });
     const unsubUsers = onSnapshot(query(collection(db, 'users')), (snap) => {
       const arr = []; snap.forEach(d => arr.push({ id: d.id, ...d.data() })); setUsers(arr);
     });
     const unsubFiles = onSnapshot(query(collection(db, 'files'), orderBy('uploadedAt', 'desc')), (snap) => {
       const arr = []; snap.forEach(d => arr.push({ id: d.id, ...d.data() })); setFiles(arr); setLoading(false);
     });
-    return () => { unsubReq(); unsubUsers(); unsubFiles(); };
+    return () => { unsubReq(); unsubReviews(); unsubUsers(); unsubFiles(); };
   }, []);
 
   const handleRequestAction = async (requestId, action, adminResponse = '') => {
@@ -139,7 +148,8 @@ const AdminPanel = ({ user }) => {
     if (newUserData.password.length < 6) { setAddUserError('Password must be at least 6 characters long'); return; }
     setAddUserLoading(true); setAddUserError(''); setAddUserSuccess('');
     try {
-      const cred = await createUserWithEmailAndPassword(auth, newUserData.email, newUserData.password);
+  const authForCreate = secondaryAuth || auth;
+  const cred = await createUserWithEmailAndPassword(authForCreate, newUserData.email, newUserData.password);
       await setDoc(doc(db, 'users', cred.user.uid), { email: newUserData.email, username: newUserData.username, role: newUserData.role, createdAt: new Date(), createdBy: user.uid, createdByEmail: user.email, isActive: true });
       setAddUserSuccess(`User ${newUserData.username} (${newUserData.email}) has been created successfully!`);
       setNewUserData({ email: '', username: '', password: '', role: 'user' });
@@ -251,6 +261,38 @@ const AdminPanel = ({ user }) => {
     );
   };
 
+  const renderReviews = () => {
+    const pending = reviews.filter(r => (r.status || 'pending') === 'pending');
+    const formatDate = (ts) => (!ts || !ts.toDate) ? 'Unknown' : ts.toDate().toLocaleDateString();
+    return (
+      <div className="admin-section">
+        <h3>Pending Reviews ({pending.length})</h3>
+        {pending.length === 0 ? (
+          <div className="empty-state"><FaClock className="empty-icon" /><p>No pending reviews</p></div>
+        ) : (
+          <div className="requests-grid">
+            {pending.map((r) => (
+              <div key={r.id} className="request-card">
+                <div className="request-info">
+                  <h4>Review: {r.fileName || r.path || r.fullPath}</h4>
+                  {r.path && <p>Path: {r.path}</p>}
+                  {r.fullPath && !r.path && <p>Path: {r.fullPath}</p>}
+                  <p>Requested by: {r.requestedByEmail || r.requestedBy}</p>
+                  {r.assignedToEmail && <p>Assigned to: {r.assignedToEmail}</p>}
+                  <p>Date: {formatDate(r.requestedAt)}</p>
+                </div>
+                <div className="request-actions">
+                  <button onClick={async () => { try { await updateDoc(doc(db, 'reviews', r.id), { status: 'reviewed', reviewedAt: new Date(), reviewedBy: user.uid }); } catch (e) { alert('Failed to mark reviewed'); } }} className="approve-btn"><FaCheck /> Mark reviewed</button>
+                  <button onClick={async () => { try { await updateDoc(doc(db, 'reviews', r.id), { status: 'rejected', reviewedAt: new Date(), reviewedBy: user.uid }); } catch (e) { alert('Failed to reject'); } }} className="reject-btn"><FaTimes /> Reject</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const renderUsers = () => (
     <div className="admin-section">
       <h3>User Management ({users.length} users)</h3>
@@ -268,6 +310,7 @@ const AdminPanel = ({ user }) => {
                   <select value={u.role || 'user'} onChange={(e) => handleUserRoleChange(u.id, e.target.value)} className={`role-select ${u.role}`}>
                     <option value="viewer">Viewer</option>
                     <option value="user">User</option>
+                    <option value="editor">Editor</option>
                     <option value="admin">Admin</option>
                   </select>
                 </td>
@@ -279,6 +322,22 @@ const AdminPanel = ({ user }) => {
                     <div style={{ display: 'inline-flex', gap: 8 }}>
                       <button className="reset-password-btn" onClick={() => handlePasswordResetClick(u)} title={`Send password reset email to ${u.email}`}><FaEnvelope /></button>
                       <button className="reset-password-btn" onClick={() => { setSetPwTarget(u); setShowSetPw(true); }} title={`Set a new password for ${u.email}`}><FaKey /></button>
+                      <button className="reset-password-btn" onClick={() => { setEditUserTarget(u); setShowEditUser(true); }} title={`Edit ${u.email}`}>✎</button>
+                      <button className="reset-password-btn" onClick={async () => {
+                        if (deletingUid) return;
+                        if (u.id === user.uid) { alert('You cannot delete your own admin account.'); return; }
+                        const confirm = window.confirm(`Delete user ${u.email}? This removes their account and Firestore profile.`);
+                        if (!confirm) return;
+                        try {
+                          setDeletingUid(u.id);
+                          const fn = httpsCallable(getFunctions(undefined, 'us-central1'), 'adminDeleteUser');
+                          await fn({ uid: u.id });
+                        } catch (err) {
+                          alert(err?.message || 'Failed to delete user');
+                        } finally {
+                          setDeletingUid('');
+                        }
+                      }} title={`Delete ${u.email}`} disabled={!!deletingUid}>{deletingUid === u.id ? '…' : '🗑'}</button>
                     </div>
                   </div>
                 </td>
@@ -349,7 +408,7 @@ const AdminPanel = ({ user }) => {
   const renderOptimize = () => (
     <div className="admin-section">
       <h3>Optimize Existing Images</h3>
-      <p style={{ maxWidth: 820, color: '#555' }}>Compress existing JPEGs in Storage. Start with a dry run to preview size savings.</p>
+  <p style={{ maxWidth: 820, color: '#555' }}>Compress existing JPEGs in Storage. Start with a dry run to preview size savings.</p>
       <p style={{ maxWidth: 820, color: '#6b7280', marginTop: 6, fontSize: 13 }}>
         Note: Files already optimized with the same mode are skipped unless you enable "Overwrite". Upload optimization is <strong>opt‑in</strong> at upload time.
       </p>
@@ -596,7 +655,7 @@ const AdminPanel = ({ user }) => {
             <div className="form-group"><label htmlFor="userEmail">Email Address *</label><input type="email" id="userEmail" value={newUserData.email} onChange={(e) => setNewUserData({ ...newUserData, email: e.target.value })} placeholder="user@example.com" required disabled={addUserLoading} /></div>
             <div className="form-group"><label htmlFor="userName">Username *</label><input type="text" id="userName" value={newUserData.username} onChange={(e) => setNewUserData({ ...newUserData, username: e.target.value })} placeholder="Enter username" required disabled={addUserLoading} /></div>
             <div className="form-group"><label htmlFor="userPassword">Password *</label><input type="password" id="userPassword" value={newUserData.password} onChange={(e) => setNewUserData({ ...newUserData, password: e.target.value })} placeholder="Minimum 6 characters" minLength={6} required disabled={addUserLoading} /><small className="password-hint">Password must be at least 6 characters long</small></div>
-            <div className="form-group"><label htmlFor="userRole">Role *</label><select id="userRole" value={newUserData.role} onChange={(e) => setNewUserData({ ...newUserData, role: e.target.value })} required disabled={addUserLoading}><option value="viewer">Viewer - Read-only access</option><option value="user">User - Upload files, submit requests</option><option value="admin">Admin - Full access</option></select></div>
+            <div className="form-group"><label htmlFor="userRole">Role *</label><select id="userRole" value={newUserData.role} onChange={(e) => setNewUserData({ ...newUserData, role: e.target.value })} required disabled={addUserLoading}><option value="viewer">Viewer - Read-only access</option><option value="user">User - Upload files, submit requests</option><option value="editor">Editor - Edit tags, upload files</option><option value="admin">Admin - Full access</option></select></div>
             <div className="form-actions"><button type="button" className="cancel-btn" onClick={resetAddUserForm} disabled={addUserLoading}>Cancel</button><button type="submit" className="create-user-btn" disabled={addUserLoading}>{addUserLoading ? 'Creating...' : 'Create User'}</button></div>
           </form>
         </div>
@@ -630,11 +689,14 @@ const AdminPanel = ({ user }) => {
           <Link to="/dashboard" className="back-link"><FaArrowLeft /> Back to Dashboard</Link>
           <h1>Admin Panel</h1>
         </div>
-        <div className="header-right"><span>Logged in as: {user.email}</span></div>
+        <div className="header-right" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span>Logged in as: {user.email}</span>
+        </div>
       </header>
 
       <div className="admin-tabs">
-        <button className={`tab-btn ${activeTab === 'requests' ? 'active' : ''}`} onClick={() => setActiveTab('requests')}><FaFileAlt /> Requests ({requests.filter(r => r.status === 'pending').length})</button>
+  <button className={`tab-btn ${activeTab === 'requests' ? 'active' : ''}`} onClick={() => setActiveTab('requests')}><FaFileAlt /> Requests ({requests.filter(r => r.status === 'pending').length})</button>
+  <button className={`tab-btn ${activeTab === 'reviews' ? 'active' : ''}`} onClick={() => setActiveTab('reviews')}><FaFileAlt /> Reviews ({reviews.filter(r => (r.status||'pending') === 'pending').length})</button>
         <button className={`tab-btn ${activeTab === 'users' ? 'active' : ''}`} onClick={() => setActiveTab('users')}><FaUsers /> Users ({users.length})</button>
         <button className={`tab-btn ${activeTab === 'addUsers' ? 'active' : ''}`} onClick={() => setActiveTab('addUsers')}><FaUserPlus /> Add Users</button>
         <button className={`tab-btn ${activeTab === 'files' ? 'active' : ''}`} onClick={() => setActiveTab('files')}><FaFileAlt /> Files ({files.length})</button>
@@ -643,6 +705,7 @@ const AdminPanel = ({ user }) => {
 
       <div className="admin-content">
         {activeTab === 'requests' && renderRequests()}
+        {activeTab === 'reviews' && renderReviews()}
         {activeTab === 'users' && renderUsers()}
         {activeTab === 'addUsers' && renderAddUsers()}
         {activeTab === 'files' && renderFiles()}
@@ -696,6 +759,7 @@ const AdminPanel = ({ user }) => {
       )}
 
       <AdminSetPasswordModal open={showSetPw} onClose={() => { setShowSetPw(false); setSetPwTarget(null); }} targetUser={setPwTarget} />
+  <AdminEditUserModal open={showEditUser} onClose={() => { setShowEditUser(false); setEditUserTarget(null); }} user={editUserTarget} />
     </div>
   );
 };

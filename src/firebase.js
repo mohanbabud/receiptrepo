@@ -1,5 +1,5 @@
 // Firebase configuration
-import { initializeApp } from 'firebase/app';
+import { initializeApp, getApp, getApps } from 'firebase/app';
 import { getAuth, setPersistence, inMemoryPersistence } from 'firebase/auth';
 import { initializeFirestore } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
@@ -83,5 +83,18 @@ try {
 export const functions = getFunctions(app, {
   timeout: 3000 // milliseconds
 });
+
+// Secondary Auth for privileged client workflows (e.g., create other users)
+// Using a separate app prevents switching the primary auth session.
+export let secondaryAuth = undefined;
+try {
+  const secondaryApp = getApps().some(a => a.name === 'secondary') ? getApp('secondary') : initializeApp(firebaseConfig, 'secondary');
+  secondaryAuth = getAuth(secondaryApp);
+  // eslint-disable-next-line no-console
+  console.info('[Firebase] Secondary auth initialized');
+} catch (e) {
+  // eslint-disable-next-line no-console
+  console.warn('[Firebase] Secondary auth unavailable:', e && e.message);
+}
 
 export default app;

@@ -12,6 +12,7 @@ import ThemeToggle from './ThemeToggle';
 import AccentToggle from './AccentToggle';
 import PresetToggle from './PresetToggle';
 import ChangePasswordModal from './ChangePasswordModal';
+import { FaBars, FaSearch, FaTools, FaKey, FaSignOutAlt, FaUpload, FaChevronUp, FaCloudUploadAlt } from 'react-icons/fa';
 
 const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset, setPreset }) => {
   // No left sidebar path sync; Files view controls the path
@@ -208,6 +209,16 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
     }
   }, [clampPreviewWidth]);
 
+  // When preview is closed, signal FolderTree to close any open tags UI (popover or editor)
+  const prevSelectedRef = useRef(null);
+  useEffect(() => {
+    const prev = prevSelectedRef.current;
+    if (prev && !selectedFile) {
+      try { window.dispatchEvent(new CustomEvent('close-tags-pane')); } catch {}
+    }
+    prevSelectedRef.current = selectedFile;
+  }, [selectedFile]);
+
   // Jump to a path requested by TagSearchPage
   useEffect(() => {
     try {
@@ -252,7 +263,7 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
               setMobileMenuOpen(v => !v);
             }}
           >
-            ☰
+            <FaBars aria-hidden="true" />
           </button>
         </div>
         <div className="header-info" style={{ justifyContent: 'space-between', flexWrap: 'wrap' }}>
@@ -265,7 +276,7 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
             <AccentToggle accent={accent} setAccent={setAccent} />
             <PresetToggle preset={preset} setPreset={setPreset} />
             <StatusBar />
-            <Link to="/search" className="admin-link" title="Open Receipt Search">🔎 Search</Link>
+            <Link to="/search" className="admin-link" title="Open Receipt Search"><FaSearch style={{ marginRight: 6 }} aria-hidden="true" /> Search</Link>
             {/* Compact user menu on the far right */}
             <div className="user-menu" style={{ position: 'relative' }}>
               <button
@@ -280,10 +291,16 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
               {userMenuOpen && (
                 <div className="user-menu-list" role="menu" aria-label="Account">
                   {userRole === 'admin' && (
-                    <Link to="/admin" className="user-menu-item" role="menuitem" onClick={() => setUserMenuOpen(false)}>🛠️ Admin Panel</Link>
+                    <Link to="/admin" className="user-menu-item" role="menuitem" onClick={() => setUserMenuOpen(false)}>
+                      <FaTools style={{ marginRight: 6 }} aria-hidden="true" /> Admin Panel
+                    </Link>
                   )}
-                  <button className="user-menu-item" role="menuitem" onClick={() => { setShowChangePw(true); setUserMenuOpen(false); }}>🔑 Change Password</button>
-                  <button className="user-menu-item danger" role="menuitem" onClick={handleLogout}>� Logout</button>
+                  <button className="user-menu-item" role="menuitem" onClick={() => { setShowChangePw(true); setUserMenuOpen(false); }}>
+                    <FaKey style={{ marginRight: 6 }} aria-hidden="true" /> Change Password
+                  </button>
+                  <button className="user-menu-item danger" role="menuitem" onClick={handleLogout}>
+                    <FaSignOutAlt style={{ marginRight: 6 }} aria-hidden="true" /> Logout
+                  </button>
                 </div>
               )}
             </div>
@@ -333,7 +350,7 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
                   onClick={() => setMobileMenuOpen(false)}
                   role="menuitem"
                 >
-                  🛠️ Admin Panel
+                  <FaTools style={{ marginRight: 6 }} aria-hidden="true" /> Admin Panel
                 </Link>
               )}
               <button
@@ -341,14 +358,14 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
                 onClick={() => { setShowChangePw(true); setMobileMenuOpen(false); }}
                 role="menuitem"
               >
-                🔑 Change Password
+                <FaKey style={{ marginRight: 6 }} aria-hidden="true" /> Change Password
               </button>
               <button
                 className="mobile-menu-item"
                 onClick={handleLogout}
                 role="menuitem"
               >
-                🚪 Logout
+                <FaSignOutAlt style={{ marginRight: 6 }} aria-hidden="true" /> Logout
               </button>
             </div>
           )}
@@ -384,7 +401,17 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
                   {userRole !== 'viewer' && (
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto' }}>
                       <button className="action-btn upload-files" onClick={() => setCollapseUploader(v => !v)}>
-                        {collapseUploader ? '📤 Upload Files' : '▲ Close Upload'}
+                        {collapseUploader ? (
+                          <>
+                            <FaUpload style={{ marginRight: 6 }} aria-hidden="true" />
+                            <span>Upload Files</span>
+                          </>
+                        ) : (
+                          <>
+                            <FaChevronUp style={{ marginRight: 6 }} aria-hidden="true" />
+                            <span>Close Upload</span>
+                          </>
+                        )}
                       </button>
                     </div>
                   )}
@@ -455,7 +482,7 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
       {userRole !== 'viewer' && dragOverlayVisible && (
         <div className="drop-overlay" onDragOver={onBannerDrag} onDrop={onBannerDrop}>
           <div className="drop-overlay-inner">
-            <div className="drop-overlay-icon">📥</div>
+            <div className="drop-overlay-icon"><FaCloudUploadAlt aria-hidden="true" /></div>
             <div className="drop-overlay-text">Drop files to upload</div>
           </div>
         </div>

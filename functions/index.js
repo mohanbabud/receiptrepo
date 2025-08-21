@@ -455,3 +455,89 @@ exports.optimizeOnUpload = functions.storage.object().onFinalize(async (object) 
     console.error('optimizeOnUpload error:', err);
   }
 });
+
+// Admin update user (email/username/role/isActive) via Admin SDK
+exports.adminUpdateUser = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError('unauthenticated', 'User must be authenticated');
+  }
+  const callerUid = context.auth.uid;
+  const callerDoc = await db.collection('users').doc(callerUid).get();
+  if (!callerDoc.exists || callerDoc.data().role !== 'admin') {
+    throw new functions.https.HttpsError('permission-denied', 'Only admin can update users');
+  }
+  const { uid, email, username, role, isActive } = data || {};
+  if (!uid || typeof uid !== 'string') {
+    throw new functions.https.HttpsError('invalid-argument', 'uid is required');
+  }
+  const allowedRoles = new Set(['viewer', 'user', 'editor', 'admin']);
+  try {
+    if (email && typeof email === 'string') {
+      await admin.auth().updateUser(uid, { email });
+    }
+    const payload = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+    if (email && typeof email === 'string') payload.email = email;
+    if (username && typeof username === 'string') payload.username = username;
+    if (role && typeof role === 'string') {
+      if (!allowedRoles.has(role)) throw new Error('Invalid role');
+      payload.role = role;
+    }
+    if (typeof isActive === 'boolean') payload.isActive = isActive;
+    if (Object.keys(payload).length > 0) {
+      await db.collection('users').doc(uid).set(payload, { merge: true });
+    }
+    return { success: true };
+  } catch (err) {
+    console.error('adminUpdateUser error:', err);
+    throw new functions.https.HttpsError('internal', err?.message || 'Failed to update user');
+  }
+});
+
+// Admin delete user (Auth + Firestore doc and subcollections like favorites)
+exports.adminDeleteUser = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError('unauthenticated', 'User must be authenticated');
+  }
+  const callerUid = context.auth.uid;
+  const callerDoc = await db.collection('users').doc(callerUid).get();
+  if (!callerDoc.exists || callerDoc.data().role !== 'admin') {
+    throw new functions.https.HttpsError('permission-denied', 'Only admin can delete users');
+  }
+  const { uid } = data || {};
+  if (!uid || typeof uid !== 'string') {
+    throw new functions.https.HttpsError('invalid-argument', 'uid is required');
+  }
+  if (uid === callerUid) {
+    throw new functions.https.HttpsError('failed-precondition', 'You cannot delete your own account');
+  }
+  try {
+    // Delete favorites subcollection if present
+    try {
+      const favsSnap = await db.collection('users').doc(uid).collection('favorites').get();
+      if (!favsSnap.empty) {
+        const batch = db.batch();
+        favsSnap.forEach((docSnap) => batch.delete(docSnap.ref));
+        await batch.commit();
+      }
+    } catch (e) {
+      console.warn('Failed cleaning favorites for', uid, e?.message || e);
+    }
+
+    // Delete Firestore user doc
+    try { await db.collection('users').doc(uid).delete(); } catch (e) {
+      console.warn('Failed deleting user doc for', uid, e?.message || e);
+    }
+
+    // Delete Auth user
+    await admin.auth().deleteUser(uid).catch((e) => {
+      // If user already missing, ignore
+      const msg = e && (e.code || e.message || '').toString();
+      if (msg && msg.includes('auth/user-not-found')) return;
+      throw e;
+    });
+    return { success: true };
+  } catch (err) {
+    console.error('adminDeleteUser error:', err);
+    throw new functions.https.HttpsError('internal', err?.message || 'Failed to delete user');
+  }
+});

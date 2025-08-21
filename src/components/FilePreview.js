@@ -1,5 +1,5 @@
 /* eslint-disable react-hooks/rules-of-hooks */
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useRef } from 'react';
 import PdfFlipbook from './PdfFlipbook';
 import PdfPlainViewer from './PdfPlainViewer';
 import { deleteObject, ref, getDownloadURL, getMetadata, uploadBytes } from 'firebase/storage';
@@ -12,7 +12,9 @@ import {
   FaPen,
   FaExpandArrowsAlt,
   FaCompressArrowsAlt,
-  FaCompressAlt
+  FaCompressAlt,
+  FaUndoAlt,
+  FaRedoAlt
 } from 'react-icons/fa';
 import './FilePreview.css';
 
@@ -23,9 +25,15 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
   const [details, setDetails] = useState({ url: file.downloadURL, type: file.type, size: file.size, uploadedAt: file.uploadedAt, fullPath: file.fullPath });
   const [textPreview, setTextPreview] = useState(null);
   const [imageFit, setImageFit] = useState('contain'); // 'contain' | 'cover'
+  const [rotateDeg, setRotateDeg] = useState(0); // 0, 90, 180, 270
   const isPlaceholder = file.name === '.folder-placeholder' || file.name === '.folder_placeholder' || file.name === '.keep';
   // Flipbook state for PDFs
   const [useFlipbook, setUseFlipbook] = useState(false);
+  // Drag (move) preview window
+  const [pos, setPos] = useState(null); // {x, y} once dragged
+  const [dragging, setDragging] = useState(false);
+  const previewRef = useRef(null);
+  const headerRef = useRef(null);
   
 
   // Helper: infer MIME from filename when metadata is missing or generic
@@ -96,6 +104,12 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
     return () => { mounted = false; };
   }, [file]);
 
+  // Reset rotation and position on file change
+  useEffect(() => {
+    setRotateDeg(0);
+    setPos(null);
+  }, [file?.id, file?.name, file?.fullPath]);
+
   // Fetch small text-based files for inline preview
   useEffect(() => {
     const t = (effectiveType || '').toLowerCase();
@@ -127,6 +141,71 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
     const url = details.url || file.downloadURL;
     if (url) window.open(url, '_blank');
   };
+
+  // Handle drag to move preview window similar to Edit Tags modal
+  useEffect(() => {
+    const headerEl = headerRef.current;
+    if (!headerEl) return;
+
+    let startX = 0, startY = 0;
+    let origX = 0, origY = 0;
+
+    const onMouseDown = (e) => {
+      // Avoid starting drag from buttons/inputs inside header
+      const tag = String(e.target?.tagName || '').toLowerCase();
+      if (tag === 'button' || tag === 'svg' || tag === 'path' || tag === 'input') return;
+      setDragging(true);
+      startX = e.clientX; startY = e.clientY;
+      const cur = pos || (() => {
+        // compute centered position on first drag
+        const vw = window.innerWidth; const vh = window.innerHeight;
+        const el = previewRef.current; const w = el?.offsetWidth || 720; const h = el?.offsetHeight || 600;
+        return { x: Math.max(8, Math.round((vw - w) / 2)), y: Math.max(8, Math.round((vh - h) / 2)) };
+      })();
+      origX = cur.x; origY = cur.y;
+      setPos(cur);
+      document.body.style.userSelect = 'none';
+      document.body.style.cursor = 'grabbing';
+    };
+    const onMouseMove = (e) => {
+      if (!dragging) return;
+      const dx = e.clientX - startX; const dy = e.clientY - startY;
+      const el = previewRef.current; const w = el?.offsetWidth || 720; const h = el?.offsetHeight || 600;
+      const vw = window.innerWidth; const vh = window.innerHeight;
+      const nx = Math.min(vw - w - 8, Math.max(8, origX + dx));
+      const ny = Math.min(vh - h - 8, Math.max(8, origY + dy));
+      setPos({ x: nx, y: ny });
+    };
+    const onMouseUp = () => {
+      if (!dragging) return;
+      setDragging(false);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    };
+
+    headerEl.addEventListener('mousedown', onMouseDown);
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    return () => {
+      headerEl.removeEventListener('mousedown', onMouseDown);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    };
+  }, [dragging, pos]);
+
+  // Keep window within viewport on resize
+  useEffect(() => {
+    const onResize = () => {
+      if (!pos) return;
+      const el = previewRef.current; const w = el?.offsetWidth || 720; const h = el?.offsetHeight || 600;
+      const vw = window.innerWidth; const vh = window.innerHeight;
+      setPos({ x: Math.min(vw - w - 8, Math.max(8, pos.x)), y: Math.min(vh - h - 8, Math.max(8, pos.y)) });
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [pos]);
 
   // Lossless optimize: copy pages and clear non-essential metadata; do not rasterize.
   const handleOptimizePdfLossless = async () => {
@@ -297,7 +376,13 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
       return (
         <div className="image-preview">
           {details.url ? (
-            <img src={details.url} alt={file.name} className={`fit-${imageFit}`} draggable={false} />
+            <img
+              src={details.url}
+              alt={file.name}
+              className={`fit-${imageFit}`}
+              draggable={false}
+              style={{ transform: `rotate(${rotateDeg}deg)`, transformOrigin: 'center center' }}
+            />
           ) : (
             <div style={{ padding: 12, color: '#666' }}>Fetching preview…</div>
           )}
@@ -306,13 +391,13 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
     }
     // PDFs
     if (t === 'application/pdf') {
-      if (useFlipbook) {
+  if (useFlipbook) {
         return (
           <div className="pdf-preview" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center' }}>
               <button className="action-btn" onClick={() => setUseFlipbook(false)}>Switch to simple viewer</button>
             </div>
-            <PdfFlipbook url={details.url} height={600} />
+    <PdfFlipbook url={details.url} height={600} rotate={rotateDeg} />
           </div>
         );
       }
@@ -321,7 +406,7 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center' }}>
             <button className="action-btn" onClick={() => setUseFlipbook(true)}>Switch to flipbook</button>
           </div>
-          <PdfPlainViewer url={details.url} height={600} />
+      <PdfPlainViewer url={details.url} height={600} rotate={rotateDeg} />
         </div>
       );
     }
@@ -379,8 +464,12 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
 
   return (
       <div className="file-preview-overlay">
-        <div className="file-preview">
-          <div className="preview-header">
+        <div
+          ref={previewRef}
+          className={`file-preview${pos ? ' movable' : ''}${dragging ? ' dragging' : ''}`}
+          style={pos ? { position: 'absolute', left: pos.x, top: pos.y } : undefined}
+        >
+          <div ref={headerRef} className="preview-header">
             <div className="file-title">
               {isRenaming ? (
                 <div className="rename-input">
@@ -407,6 +496,25 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
                 >
                   {imageFit === 'contain' ? <FaExpandArrowsAlt /> : <FaCompressArrowsAlt />}
                 </button>
+              )}
+              {/* Rotate controls for image/PDF */}
+              {(String(effectiveType || '').toLowerCase().startsWith('image/') || String(effectiveType || '').toLowerCase() === 'application/pdf') && (
+                <>
+                  <button
+                    onClick={() => setRotateDeg(d => (d + 270) % 360)}
+                    className="action-btn"
+                    title="Rotate left"
+                  >
+                    <FaUndoAlt />
+                  </button>
+                  <button
+                    onClick={() => setRotateDeg(d => (d + 90) % 360)}
+                    className="action-btn"
+                    title="Rotate right"
+                  >
+                    <FaRedoAlt />
+                  </button>
+                </>
               )}
               {/* Admin-only: Lossless PDF optimize */}
               {userRole === 'admin' && String(effectiveType || '').toLowerCase() === 'application/pdf' && (

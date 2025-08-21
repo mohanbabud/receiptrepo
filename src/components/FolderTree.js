@@ -1,16 +1,16 @@
 ﻿/* eslint-disable unicode-bom */
 /* eslint-disable react-hooks/exhaustive-deps */
 /* eslint-disable no-loop-func */
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 // import { Link } from 'react-router-dom';
 import { ref, listAll, getMetadata, uploadBytes, deleteObject, getDownloadURL } from 'firebase/storage';
 import { httpsCallable } from 'firebase/functions';
 import { functions } from '../firebase';
 import { storage, db, auth } from '../firebase';
-import { collection, doc, onSnapshot, setDoc, deleteDoc, addDoc, serverTimestamp, getDocs, query as fsQuery, where } from 'firebase/firestore';
+import { collection, doc, onSnapshot, setDoc, deleteDoc, addDoc, serverTimestamp, getDocs, query as fsQuery, where, arrayUnion } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 import StorageTreeView from './StorageTreeView';
-import { FaTrash, FaEdit, FaCopy, FaCut, FaStar, FaRegStar, FaDownload, FaEye, FaArrowUp } from 'react-icons/fa';
+import { FaTrash, FaEdit, FaCopy, FaCut, FaStar, FaRegStar, FaDownload, FaEye, FaArrowUp, FaEllipsisH, FaInfoCircle, FaTag, FaCheckCircle } from 'react-icons/fa';
 import { MacFolderIcon, MacFileIcon } from './icons/MacIcons';
 import './FolderTree.css';
 
@@ -58,8 +58,25 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   const [selectedFiles, setSelectedFiles] = useState(new Set());
   const [selectedFolders, setSelectedFolders] = useState(new Set());
   // Labels (tags + color) and Favorites state
+  const [reviewedPaths, setReviewedPaths] = useState(new Set());
+  const [reviewedFileIds, setReviewedFileIds] = useState(new Set());
+  const [pendingPaths, setPendingPaths] = useState(new Set());
+  const [pendingFileIds, setPendingFileIds] = useState(new Set());
+  const [tagPopoverFor, setTagPopoverFor] = useState(null); // file id
   const [folderLabels, setFolderLabels] = useState({}); // { [path]: { tags: string[], color: string } }
   const [favoriteFolders, setFavoriteFolders] = useState(new Set()); // Set<string>
+  // Reviews: reintroduced minimal send-for-review modal
+  const [reviewModal, setReviewModal] = useState({ open: false, type: null, target: null }); // type: 'file'|'folder'
+  const [reviewAdmins, setReviewAdmins] = useState([]); // [{id, email, username}]
+  const [reviewAssignee, setReviewAssignee] = useState(''); // admin uid
+  const [reviewSubmitting, setReviewSubmitting] = useState(false);
+  // Bulk review modal state
+  const [bulkReviewModal, setBulkReviewModal] = useState({ open: false, fileIds: [] });
+  const [bulkReviewSubmitting, setBulkReviewSubmitting] = useState(false);
+  // Bulk tags modal state
+  const [bulkTagsModal, setBulkTagsModal] = useState({ open: false });
+  const [bulkTagsText, setBulkTagsText] = useState('');
+  const [bulkTagsOverwrite, setBulkTagsOverwrite] = useState(false);
   // UI feedback states for folder navigation
   const [clickingFolder, setClickingFolder] = useState(null); // path string
   const [navigatingTo, setNavigatingTo] = useState(null); // path string
@@ -76,7 +93,68 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   const [editingTagsFor, setEditingTagsFor] = useState(null); // file id
   const [tagsRows, setTagsRows] = useState([{ key: '', value: '' }]);
   const [tagsError, setTagsError] = useState('');
+  // Draggable position for Edit Tags modal
+  const [tagsModalPos, setTagsModalPos] = useState({ x: 24, y: 24 });
+  const [tagsModalSize, setTagsModalSize] = useState({ w: 520, h: 420 });
+  const tagsDragRef = useRef({ active: false, startX: 0, startY: 0, offsetX: 0, offsetY: 0 });
+  const tagsResizeRef = useRef({ active: false, startX: 0, startY: 0, startW: 520, startH: 420 });
   // Tag search moved to dedicated page; no local state here
+  const [valueSuggestIdx, setValueSuggestIdx] = useState(null); // which row's value suggestions are open
+  const [savingTags, setSavingTags] = useState(false);
+  // Load admins for review assignment
+  useEffect(() => {
+    try {
+      const q = fsQuery(collection(db, 'users'), where('role', '==', 'admin'));
+      const unsub = onSnapshot(q, (snap) => {
+        const arr = []; snap.forEach(d => { const u = d.data() || {}; arr.push({ id: d.id, email: u.email || '', username: u.username || '' }); });
+        setReviewAdmins(arr);
+      });
+      return () => { unsub && unsub(); };
+    } catch (_) { /* ignore */ }
+  }, []);
+  const [moreMenu, setMoreMenu] = useState({ open: false, kind: null, target: null }); // kind: 'file' | 'folder'
+
+  // Catalog for tag suggestions from Firestore (global)
+  const [catalogKeys, setCatalogKeys] = useState([]);
+  const [catalogValues, setCatalogValues] = useState({}); // { [key]: Set<string> }
+  const encodeKeyId = (k) => 'key_' + encodeURIComponent(String(k || ''));
+
+  // Suggestions built from currently loaded files' tags (plus defaults)
+  const tagKeySuggestions = useMemo(() => {
+    const s = new Set([...DEFAULT_TAG_KEYS, ...catalogKeys]);
+    try {
+      (storageFiles || []).forEach(f => {
+        const t = f && f.tags;
+        if (t && typeof t === 'object') {
+          Object.keys(t).forEach(k => { if (k) s.add(String(k)); });
+        }
+      });
+    } catch { /* noop */ }
+    return Array.from(s).sort((a, b) => a.localeCompare(b));
+  }, [storageFiles, catalogKeys]);
+  const tagValueSuggestionsByKey = useMemo(() => {
+    const m = new Map();
+    try {
+      (storageFiles || []).forEach(f => {
+        const t = f && f.tags;
+        if (!t || typeof t !== 'object') return;
+        Object.entries(t).forEach(([k, v]) => {
+          if (!k) return;
+          const val = String(v ?? '');
+          if (val === '') return;
+          if (!m.has(k)) m.set(k, new Set());
+          m.get(k).add(val);
+        });
+      });
+    } catch { /* noop */ }
+    try {
+      Object.entries(catalogValues || {}).forEach(([k, setVals]) => {
+        if (!m.has(k)) m.set(k, new Set());
+        (setVals instanceof Set ? Array.from(setVals) : []).forEach(v => m.get(k).add(String(v)));
+      });
+    } catch { /* noop */ }
+    return m;
+  }, [storageFiles, catalogValues]);
 
   // Auto-close success popup after a short delay (2s for success, 5s for errors)
   useEffect(() => {
@@ -85,6 +163,72 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     const t = setTimeout(() => setShowSuccessPopup(false), delay);
     return () => clearTimeout(t);
   }, [showSuccessPopup, isError]);
+
+  // Global mouse listeners for dragging the Edit Tags modal
+  useEffect(() => {
+    const onMove = (e) => {
+      if (tagsResizeRef.current.active) {
+        const dx = e.clientX - tagsResizeRef.current.startX;
+        const dy = e.clientY - tagsResizeRef.current.startY;
+        const minW = 360, minH = 260, margin = 8;
+        const maxW = Math.max(minW, (window.innerWidth || 0) - tagsModalPos.x - margin);
+        const maxH = Math.max(minH, (window.innerHeight || 0) - tagsModalPos.y - margin);
+        let nw = Math.min(Math.max(minW, tagsResizeRef.current.startW + dx), maxW);
+        let nh = Math.min(Math.max(minH, tagsResizeRef.current.startH + dy), maxH);
+        setTagsModalSize({ w: nw, h: nh });
+        return;
+      }
+      if (tagsDragRef.current.active) {
+        const dx = e.clientX - tagsDragRef.current.startX;
+        const dy = e.clientY - tagsDragRef.current.startY;
+        let nx = tagsDragRef.current.offsetX + dx;
+        let ny = tagsDragRef.current.offsetY + dy;
+        // Clamp within viewport bounds (leave small margins)
+        const margin = 8;
+        const maxX = Math.max(0, (window.innerWidth || 0) - tagsModalSize.w - margin);
+        const maxY = Math.max(0, (window.innerHeight || 0) - tagsModalSize.h - margin);
+        nx = Math.min(Math.max(margin, nx), maxX);
+        ny = Math.min(Math.max(margin, ny), maxY);
+        setTagsModalPos({ x: nx, y: ny });
+      }
+    };
+    const onUp = () => {
+      tagsDragRef.current.active = false;
+      tagsResizeRef.current.active = false;
+      try { document.body.style.userSelect = ''; document.body.style.cursor = ''; } catch {}
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [tagsModalSize, tagsModalPos]);
+
+  // Load global Tags Catalog (keys and values) for suggestions
+  useEffect(() => {
+    // Wait for auth to be initialized to avoid permission errors before sign-in
+    if (!authReady) return;
+    let unsubscribes = [];
+    try {
+      const keysUnsub = onSnapshot(collection(db, 'tags_catalog'), (snap) => {
+        const keys = [];
+        const valMap = {};
+        snap.forEach((d) => {
+          const data = d.data() || {};
+          const key = data.key || data.id || d.id;
+          if (!key) return;
+          keys.push(String(key));
+          const vals = Array.isArray(data.values) ? data.values : [];
+          valMap[String(key)] = new Set(vals.map(v => String(v)));
+        });
+        setCatalogKeys(keys.sort((a,b) => a.localeCompare(b)));
+        setCatalogValues(valMap);
+      });
+      unsubscribes.push(keysUnsub);
+    } catch (_) { /* ignore */ }
+    return () => { try { unsubscribes.forEach(u => u && u()); } catch {} };
+  }, [authReady]);
   // Receive external events to refresh the current folder (e.g., after optimization/resync)
   useEffect(() => {
     const handler = (e) => {
@@ -209,14 +353,29 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     return () => window.removeEventListener('file-action-success', onSuccess);
   }, []);
 
+
+  // Close the compact More menu on outside click (but keep it open when clicking inside)
+  useEffect(() => {
+    if (!moreMenu.open) return;
+    const onDoc = (e) => {
+      const insideInlineMenu = !!(e.target && e.target.closest && e.target.closest('.inline-menu'));
+      if (!insideInlineMenu) setMoreMenu({ open: false, kind: null, target: null });
+    };
+    // Use bubble phase so stopPropagation on the menu can prevent this
+    document.addEventListener('click', onDoc, false);
+    return () => document.removeEventListener('click', onDoc, false);
+  }, [moreMenu.open]);
+
+  // Reviews: removed (send/assign/mark-reviewed)
+
   // Subscribe to Firestore metadata for labels and per-user favorites
   useEffect(() => {
     // Folder labels (global)
-    const unsubLabels = onSnapshot(collection(db, 'folders_meta'), (snap) => {
+  const unsubLabels = onSnapshot(collection(db, 'folders_meta'), (snap) => {
       const map = {};
       snap.forEach((d) => {
         const data = d.data() || {};
-        if (data.path) map[data.path] = { tags: Array.isArray(data.tags) ? data.tags : [], color: data.color || '#4b5563' };
+    if (data.path) map[data.path] = { tags: Array.isArray(data.tags) ? data.tags : [], color: data.color || '#4b5563', pendingReviewFor: Array.isArray(data.pendingReviewFor) ? data.pendingReviewFor : [] };
       });
       setFolderLabels(map);
     }, (err) => console.warn('folders_meta listener error', err));
@@ -286,6 +445,74 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
 
   // Load current folder from Storage (no recursion, minimal metadata)
   // Retryable wrapper to mitigate early unauthorized/app-check timing
+  // Listen for reviewed files to show green tick badge
+  useEffect(() => {
+    try {
+      const q = fsQuery(collection(db, 'reviews'), where('status', '==', 'reviewed'));
+      const unsub = onSnapshot(q, (snap) => {
+        const pathSet = new Set();
+        const idSet = new Set();
+        snap.forEach((d) => {
+          const r = d.data();
+          if (r?.targetType === 'file') {
+            if (r.fullPath) pathSet.add(r.fullPath);
+            if (r.fileId) idSet.add(r.fileId);
+          }
+        });
+        setReviewedPaths(pathSet);
+        setReviewedFileIds(idSet);
+      });
+      return () => { try { unsub(); } catch {} };
+    } catch {}
+  }, []);
+
+  // Close tags popover on outside click or Escape
+  useEffect(() => {
+    if (!tagPopoverFor) return;
+    const onDocMouseDown = (e) => {
+      const el = e.target;
+      const inPopover = el && (el.closest && (el.closest('.tag-popover') || el.closest('.tags-button')));
+      if (!inPopover) setTagPopoverFor(null);
+    };
+    const onKey = (e) => { if (e.key === 'Escape') setTagPopoverFor(null); };
+    document.addEventListener('mousedown', onDocMouseDown, true);
+    document.addEventListener('keydown', onKey, true);
+    return () => {
+      try { document.removeEventListener('mousedown', onDocMouseDown, true); } catch {}
+      try { document.removeEventListener('keydown', onKey, true); } catch {}
+    };
+  }, [tagPopoverFor]);
+
+  // Listen for pending files to show orange tick
+  useEffect(() => {
+    try {
+      const q = fsQuery(collection(db, 'reviews'), where('status', '==', 'pending'));
+      const unsub = onSnapshot(q, (snap) => {
+        const pathSet = new Set();
+        const idSet = new Set();
+        snap.forEach((d) => {
+          const r = d.data();
+          if (r?.targetType === 'file') {
+            if (r.fullPath) pathSet.add(r.fullPath);
+            if (r.fileId) idSet.add(r.fileId);
+          }
+        });
+        setPendingPaths(pathSet);
+        setPendingFileIds(idSet);
+      });
+      return () => { try { unsub(); } catch {} };
+    } catch {}
+  }, []);
+
+  // Close any open tags UI when preview closes
+  useEffect(() => {
+    const handler = () => {
+      try { setTagPopoverFor(null); } catch {}
+      try { setEditingTagsFor(null); } catch {}
+    };
+    window.addEventListener('close-tags-pane', handler);
+    return () => window.removeEventListener('close-tags-pane', handler);
+  }, []);
   const safeGetMetadata = async (storageRef, retries = 1) => {
     try {
       return await getMetadata(storageRef);
@@ -581,7 +808,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     });
     const start = (filePage - 1) * pageSize;
     const pageItems = files.slice(start, start + pageSize);
-    const need = pageItems.filter(f => f?.ref?.fullPath && (typeof f.tags === 'undefined' || typeof f.ownerUid === 'undefined'));
+  const need = pageItems.filter(f => f?.ref?.fullPath && (typeof f.tags === 'undefined' || typeof f.ownerUid === 'undefined'));
     if (need.length === 0) return;
     let cancelled = false;
     (async () => {
@@ -782,7 +1009,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   };
   // eslint-disable-next-line no-unused-vars
   const handleBulkDelete = async () => {
-    if (userRole !== 'admin') { alert('Only admin can delete.'); return; }
+  if (userRole !== 'admin') { alert('Only admin can delete directly. Non-admins can submit delete requests.'); return; }
     const files = storageFiles.filter(f => selectedFiles.has(f.id));
     const folders = Array.from(selectedFolders);
     if (files.length === 0 && folders.length === 0) return;
@@ -805,6 +1032,31 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     } catch (e) {
       setIsError(true);
       setSuccessMessage('Bulk delete encountered errors.');
+      setShowSuccessPopup(true);
+    }
+  };
+
+  // For non-admins: submit delete requests for selection
+  const handleBulkDeleteOrRequest = async () => {
+    const files = storageFiles.filter(f => selectedFiles.has(f.id));
+    const folders = Array.from(selectedFolders);
+    if (files.length === 0 && folders.length === 0) return;
+    if (userRole === 'admin') {
+      await handleBulkDelete();
+      return;
+    }
+    try {
+      const tasks = [];
+      for (const f of files) tasks.push(requestDelete(f, 'file'));
+      for (const p of folders) tasks.push(requestDelete(p, 'folder'));
+      await Promise.allSettled(tasks);
+      clearSelection();
+      setIsError(false);
+      setSuccessMessage('Delete requests submitted for admin review.');
+      setShowSuccessPopup(true);
+    } catch (_) {
+      setIsError(true);
+      setSuccessMessage('Some delete requests may have failed.');
       setShowSuccessPopup(true);
     }
   };
@@ -1680,6 +1932,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
       if (includeNestedFiles) return file.path.startsWith(path);
       return file.path === path;
     });
+  // Reviews filter removed
     if (fileFilter) {
       filteredFiles = filteredFiles.filter(file => file.name.toLowerCase().includes(fileFilter.toLowerCase()));
     }
@@ -1733,6 +1986,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
             >
               Clear
             </button>
+            {/* Reviews removed */}
           </div>
         )}
         {selectedCount > 0 && (
@@ -1740,8 +1994,18 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
             <strong>{selectedCount}</strong> selected
             <button onClick={() => openBulkModal('copy')}>Copy</button>
             <button onClick={() => openBulkModal('move')}>Move</button>
-            {userRole === 'admin' && <button onClick={handleBulkDelete} style={{ color: '#b42318' }}>Delete</button>}
+            <button onClick={handleBulkDeleteOrRequest} style={{ color: userRole === 'admin' ? '#b42318' : undefined }}>Delete</button>
             <button onClick={downloadSelectionAsZip}>Download</button>
+            {/* Bulk send for review (files only) */}
+            <button onClick={() => {
+              const files = storageFiles.filter(f => selectedFiles.has(f.id));
+              if (!files.length) { alert('Select one or more files to send for review.'); return; }
+              setBulkReviewModal({ open: true, fileIds: files.map(f => f.id) });
+            }}>Send for review</button>
+            {/* Bulk add tags (editors/admins) */}
+            {(userRole === 'editor' || userRole === 'admin') && (
+              <button onClick={() => setBulkTagsModal({ open: true })}>Add tags</button>
+            )}
             <button onClick={clearSelection} style={{ marginLeft: 'auto' }}>Clear</button>
           </div>
         )}
@@ -1784,7 +2048,33 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                     title="Rename file"
                   />
                 ) : (
-                  <span className="file-name" title={file.name} onDoubleClick={() => { setEditingFileId(file.id); setEditingName(file.name); }}>{file.name}</span>
+                  <>
+                    <span className="file-name" title={file.name} onDoubleClick={() => { setEditingFileId(file.id); setEditingName(file.name); }}>{file.name}</span>
+                    {(() => {
+                      const pathKey = file.fullPath || file?.ref?.fullPath || file.path;
+                      const isPending = pendingFileIds.has(file.id) || pendingPaths.has(pathKey);
+                      const isReviewed = reviewedFileIds.has(file.id) || reviewedPaths.has(pathKey);
+                      const color = isPending ? '#f59e0b' : (isReviewed ? '#16a34a' : null);
+                      return (
+                        <span
+                          className="review-status-slot"
+                          title={isPending ? 'Pending review' : isReviewed ? 'Reviewed' : ''}
+                          aria-hidden={!(isPending || isReviewed)}
+                          style={{ marginLeft: 6, display: 'inline-flex', alignItems: 'center' }}
+                        >
+                          {color ? (
+                            <span className="review-status-badge" style={{ color }}>
+                              <FaCheckCircle />
+                            </span>
+                          ) : (
+                            <span className="review-status-badge" style={{ visibility: 'hidden' }}>
+                              <FaCheckCircle />
+                            </span>
+                          )}
+                        </span>
+                      );
+                    })()}
+                  </>
                 )}
                 <span className="file-size">{formatFileSize(file.size)}</span>
                 {file.uploadedAt && (
@@ -1794,44 +2084,46 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                 )}
               </div>
               <div className="file-actions" style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto', paddingRight: 8 }} onClick={e => e.stopPropagation()}>
-                {/* Tags pills and editor */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, maxWidth: 420 }}>
-                  <div
-                    style={{ display: 'flex', flexWrap: 'wrap', gap: 6, maxHeight: 48, overflow: 'hidden' }}
-                    title={file.tags ? Object.entries(file.tags).map(([k,v]) => `${k}=${v}`).join(', ') : ''}
-                  >
-                    {(file.tags && Object.keys(file.tags).length)
-                      ? Object.entries(file.tags).map(([k, v]) => (
-                          <span
-                            key={k}
-                            style={{
-                              fontSize: 11,
-                              color: '#334155',
-                              background: '#eef2ff',
-                              border: '1px solid #e2e8f0',
-                              borderRadius: 999,
-                              padding: '2px 8px',
-                              lineHeight: 1.6,
-                              whiteSpace: 'nowrap'
-                            }}
-                          >
-                            {k}{String(v ?? '') !== '' ? `=${v}` : ''}
-                          </span>
-                        ))
-                      : null}
-                  </div>
-                  {((userRole === 'admin') || (auth?.currentUser && file.ownerUid === auth.currentUser.uid)) && (
-                    <button className="icon-btn" title="Edit tags" onClick={() => {
-                      setEditingTagsFor(file.id);
-                      const existing = (file.tags && Object.keys(file.tags).length)
-                        ? Object.entries(file.tags).map(([k, v]) => ({ key: String(k), value: String(v ?? '') }))
-                        : [];
-                      const existingKeys = new Set(existing.map(r => r.key));
-                      const suggested = DEFAULT_TAG_KEYS.filter(k => !existingKeys.has(k)).map(k => ({ key: k, value: '' }));
-                      const rows = (existing.length + suggested.length) ? [...existing, ...suggested] : [{ key: '', value: '' }];
-                      setTagsRows(rows);
-            setTagsError('');
-                    }} style={{ border: '1px solid #cbd5e1', borderRadius: 6, padding: '4px 8px', background: '#fff' }}>🏷️</button>
+                {/* Tags popover shown only when the tag button is clicked */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, position: 'relative' }}>
+                  {((userRole === 'admin') || (userRole === 'editor') || (auth?.currentUser && file.ownerUid === auth.currentUser.uid)) && (
+                    <button className="icon-btn tags-button" title="Tags" onClick={(e) => { e.stopPropagation(); setTagPopoverFor(prev => prev === file.id ? null : file.id); }} style={{ border: '1px solid #cbd5e1', borderRadius: 6, padding: '4px 8px', background: '#fff' }}>🏷️</button>
+                  )}
+                  {tagPopoverFor === file.id && (
+                    <div className="tag-popover" role="dialog" aria-label="File tags" style={{ position: 'absolute', top: 36, right: 0, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8, boxShadow: '0 8px 20px rgba(0,0,0,0.12)', padding: 10, minWidth: 220, maxWidth: 320, zIndex: 10002 }} onClick={(e) => e.stopPropagation()}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                        <strong style={{ fontSize: 13, color: '#334155' }}>Tags</strong>
+                        <button onClick={() => setTagPopoverFor(null)} title="Close" style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 16, lineHeight: 1 }}>✕</button>
+                      </div>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, maxHeight: 140, overflow: 'auto', paddingBottom: 6 }}>
+                        {(file.tags && Object.keys(file.tags).length) ? (
+                          Object.entries(file.tags).map(([k, v]) => (
+                            <span key={k} style={{ fontSize: 11, color: '#334155', background: '#eef2ff', border: '1px solid #e2e8f0', borderRadius: 999, padding: '2px 8px', lineHeight: 1.6, whiteSpace: 'nowrap' }}>
+                              {k}{String(v ?? '') !== '' ? `=${v}` : ''}
+                            </span>
+                          ))
+                        ) : (
+                          <span style={{ fontSize: 12, color: '#64748b' }}>No tags yet</span>
+                        )}
+                      </div>
+                      {((userRole === 'admin') || (userRole === 'editor')) && (
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                          <button onClick={() => {
+                            // Initialize editor rows then open full editor modal
+                            const existing = (file.tags && Object.keys(file.tags).length)
+                              ? Object.entries(file.tags).map(([k, v]) => ({ key: String(k), value: String(v ?? '') }))
+                              : [];
+                            const existingKeys = new Set(existing.map(r => r.key));
+                            const suggested = DEFAULT_TAG_KEYS.filter(k => !existingKeys.has(k)).map(k => ({ key: k, value: '' }));
+                            const rows = (existing.length + suggested.length) ? [...existing, ...suggested] : [{ key: '', value: '' }];
+                            setTagsRows(rows);
+                            setTagsError('');
+                            setTagPopoverFor(null);
+                            setEditingTagsFor(file.id);
+                          }} style={{ padding: '6px 10px', border: '1px solid #cbd5e1', borderRadius: 6, background: '#fff' }}>Edit…</button>
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
                 <button className="icon-btn preview" title="Preview" onClick={() => previewFile(file)}>
@@ -1840,24 +2132,51 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                 <button className="icon-btn download" title="Download" onClick={() => downloadSingleFile(file)}>
                   <FaDownload />
                 </button>
-                {userRole !== 'viewer' && (
-                  <>
-                    <button className="icon-btn rename" title="Rename" onClick={() => { setEditingFileId(file.id); setEditingName(file.name); }}>
-                      <FaEdit />
-                    </button>
-                    <button className="icon-btn copy" title="Copy" onClick={() => { setMoveCopyModal({ open: true, mode: 'copy', itemType: 'file', target: file, dest: normalizeFolderPath(currentPath || ROOT_PATH) }); }}>
-                      <FaCopy />
-                    </button>
-                    <button className="icon-btn move" title="Move" onClick={() => { setMoveCopyModal({ open: true, mode: 'move', itemType: 'file', target: file, dest: normalizeFolderPath(currentPath || ROOT_PATH) }); }}>
-                      <FaCut />
-                    </button>
-                    {userRole === 'admin' && (
-                      <button className="icon-btn delete" title="Delete" onClick={async () => { await confirmAndDeleteFile(file); }}>
-                        <FaTrash />
-                      </button>
-                    )}
-                  </>
-                )}
+                {/* Compact More menu to reduce clutter */}
+                <div style={{ position: 'relative' }}>
+                  <button className="icon-btn" title="More" onClick={(e) => { e.stopPropagation(); setMoreMenu({ open: true, kind: 'file', target: file }); }}>
+                    <FaEllipsisH />
+                  </button>
+                  {moreMenu.open && moreMenu.kind === 'file' && moreMenu.target?.id === file.id && (
+                    <div
+                      className="inline-menu"
+                      style={{ minWidth: 200 }}
+                      onMouseDown={(e)=>e.stopPropagation()}
+                      onClick={(e)=>e.stopPropagation()}
+                    >
+                      {/* Send for review */}
+                      <div className="menu-item" style={{ padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { setMoreMenu({ open: false, kind: null, target: null }); setReviewModal({ open: true, type: 'file', target: file }); }}>
+                        📨 Send for review
+                      </div>
+                      {((userRole === 'admin') || (userRole === 'editor') || (auth?.currentUser && file.ownerUid === auth.currentUser.uid)) && (
+                        <div className="menu-item" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { setMoreMenu({ open: false, kind: null, target: null }); previewFile(file); setEditingTagsFor(file.id); const existing = (file.tags && Object.keys(file.tags).length) ? Object.entries(file.tags).map(([k, v]) => ({ key: String(k), value: String(v ?? '') })) : []; const existingKeys = new Set(existing.map(r => r.key)); const suggested = DEFAULT_TAG_KEYS.filter(k => !existingKeys.has(k)).map(k => ({ key: k, value: '' })); const rows = (existing.length + suggested.length) ? [...existing, ...suggested] : [{ key: '', value: '' }]; setTagsRows(rows); setTagsError(''); }}>
+                          <FaTag /> Edit tags
+                        </div>
+                      )}
+                      {userRole !== 'viewer' && (
+                        <>
+                          <div className="menu-item" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { setMoreMenu({ open: false, kind: null, target: null }); setEditingFileId(file.id); setEditingName(file.name); }}>
+                            <FaEdit /> Rename
+                          </div>
+                          <div className="menu-item" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { setMoreMenu({ open: false, kind: null, target: null }); setMoveCopyModal({ open: true, mode: 'copy', itemType: 'file', target: file, dest: normalizeFolderPath(currentPath || ROOT_PATH) }); }}>
+                            <FaCopy /> Copy
+                          </div>
+                          <div className="menu-item" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { setMoreMenu({ open: false, kind: null, target: null }); setMoveCopyModal({ open: true, mode: 'move', itemType: 'file', target: file, dest: normalizeFolderPath(currentPath || ROOT_PATH) }); }}>
+                            <FaCut /> Move
+                          </div>
+                          {userRole === 'admin' && (
+                            <div className="menu-item danger" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={async () => { setMoreMenu({ open: false, kind: null, target: null }); await confirmAndDeleteFile(file); }}>
+                              <FaTrash /> Delete
+                            </div>
+                          )}
+                        </>
+                      )}
+                      <div className="menu-item" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onClick={() => { setMoreMenu({ open: false, kind: null, target: null }); showFileDetails(file); }}>
+                        <FaInfoCircle /> Details
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           ))
@@ -1884,6 +2203,8 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
           const close = () => { setEditingTagsFor(null); setTagsRows([{ key: '', value: '' }]); setTagsError(''); };
           const save = async () => {
             if (!tgt) { close(); return; }
+            if (savingTags) return;
+            setSavingTags(true);
             // Validate keys: no spaces, no duplicates
             setTagsError('');
             const raw = (tagsRows || []).map(r => ({ key: String(r.key || '').trim(), value: String(r.value ?? '') }));
@@ -1898,9 +2219,46 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
               const fullPath = tgt?.ref?.fullPath;
               if (fullPath) {
                 const snaps = await getDocs(fsQuery(collection(db, 'files'), where('fullPath', '==', fullPath)));
-                const batch = (await import('firebase/firestore')).writeBatch(db);
-                snaps.forEach(d => batch.update(d.ref, { tags: map }));
-                await batch.commit();
+                if (!snaps.empty) {
+                  const batch = (await import('firebase/firestore')).writeBatch(db);
+                  snaps.forEach(d => batch.update(d.ref, { tags: map, updatedAt: new Date() }));
+                  await batch.commit();
+                } else {
+                  // Create a minimal file doc so tags persist even for Storage-only files
+                  const name = tgt.name || fullPath.split('/').pop();
+                  const parent = (() => {
+                    const i = fullPath.lastIndexOf('/');
+                    const dir = i >= 0 ? fullPath.substring(0, i + 1) : '';
+                    return dir ? ('/' + dir) : '/files/';
+                  })();
+                  try {
+                    await addDoc(collection(db, 'files'), {
+                      name,
+                      path: parent,
+                      fullPath,
+                      type: tgt.type || null,
+                      size: typeof tgt.size === 'number' ? tgt.size : null,
+                      uploadedAt: new Date(),
+                      uploadedBy: 'system',
+                      uploadedByUid: auth?.currentUser?.uid || null,
+                      tags: map
+                    });
+                  } catch (e) {
+                    console.warn('Failed to create file doc for tags', e);
+                  }
+                }
+                // Update Tags Catalog keys and values
+                try {
+                  const keySet = new Set(Object.keys(map || {}));
+                  for (const k of keySet) {
+                    const keyDoc = doc(db, 'tags_catalog', encodeKeyId(k));
+                    const values = Object.prototype.hasOwnProperty.call(map, k) ? [String(map[k] || '')].filter(Boolean) : [];
+                    await setDoc(keyDoc, { key: k, values: [] }, { merge: true });
+                    if (values.length) {
+                      await setDoc(keyDoc, { values: arrayUnion(...values) }, { merge: true });
+                    }
+                  }
+                } catch (e) { console.warn('Catalog update failed', e); }
               }
               // Update local state for immediate UI feedback
               setStorageFiles(prev => prev.map(x => x.id === tgt.id ? { ...x, tags: map } : x));
@@ -1908,12 +2266,30 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
             } catch (e) {
               console.warn('Tag update failed', e);
               setIsError(true); setSuccessMessage('Failed to update tags'); setShowSuccessPopup(true);
-            } finally { close(); }
+            } finally { setSavingTags(false); close(); }
           };
           return (
-            <div className="modal-backdrop" role="dialog" aria-modal="true">
-              <div className="modal" style={{ padding: 12, background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, maxWidth: 520 }}>
-                <h4 style={{ marginTop: 0 }}>Edit Tags</h4>
+            <div
+              className="modal-backdrop"
+              role="dialog"
+              aria-modal="true"
+              style={{ position: 'fixed', top: tagsModalPos.y, left: tagsModalPos.x, zIndex: 1050, background: 'transparent', maxWidth: 560, cursor: 'default' }}
+            >
+              <div className="modal" style={{ padding: 12, background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, width: tagsModalSize.w, height: tagsModalSize.h, maxWidth: '95vw', maxHeight: '90vh', overflow: 'auto', boxShadow: '0 10px 30px rgba(0,0,0,0.2)', position: 'relative' }}>
+                <h4
+                  style={{ marginTop: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, cursor: 'move', WebkitUserSelect: 'none', userSelect: 'none' }}
+                  onMouseDown={(e) => {
+                    tagsDragRef.current.active = true;
+                    tagsDragRef.current.startX = e.clientX;
+                    tagsDragRef.current.startY = e.clientY;
+                    tagsDragRef.current.offsetX = tagsModalPos.x;
+                    tagsDragRef.current.offsetY = tagsModalPos.y;
+                    try { document.body.style.userSelect = 'none'; document.body.style.cursor = 'grabbing'; } catch {}
+                  }}
+                >
+                  <span>Edit Tags</span>
+                  <span style={{ fontSize: 12, color: '#64748b' }}>Preview is open on the right →</span>
+                </h4>
                 <div style={{ display: 'grid', gap: 10 }}>
                   <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: 10 }}>
                     <div style={{ color: '#475569', fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Current tags</div>
@@ -1939,17 +2315,60 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                       <input
                         type="text"
                         placeholder="Tag Name"
+                        list={`tag-key-list-${idx}`}
                         value={row.key}
                         onChange={(e) => { setTagsRows(prev => prev.map((r, i) => i === idx ? { ...r, key: e.target.value } : r)); setTagsError(''); }}
                         style={{ padding: '8px 10px', border: '1px solid #cbd5e1', borderRadius: 6 }}
                       />
-                      <input
-                        type="text"
-                        placeholder="Value"
-                        value={row.value}
-                        onChange={(e) => { setTagsRows(prev => prev.map((r, i) => i === idx ? { ...r, value: e.target.value } : r)); setTagsError(''); }}
-                        style={{ padding: '8px 10px', border: '1px solid #cbd5e1', borderRadius: 6 }}
-                      />
+                      <datalist id={`tag-key-list-${idx}`}>
+                        {tagKeySuggestions.map(k => (
+                          <option key={k} value={k} />
+                        ))}
+                      </datalist>
+                      <div style={{ position: 'relative' }}>
+                        <input
+                          type="text"
+                          placeholder="Value"
+                          value={row.value}
+                          onFocus={() => setValueSuggestIdx(idx)}
+                          onBlur={(e) => {
+                            // Delay close to allow click on suggestion
+                            setTimeout(() => setValueSuggestIdx(prev => (prev === idx ? null : prev)), 120);
+                          }}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setTagsRows(prev => prev.map((r, i) => i === idx ? { ...r, value: val } : r));
+                            setTagsError('');
+                            if (valueSuggestIdx !== idx) setValueSuggestIdx(idx);
+                          }}
+                          style={{ padding: '8px 10px', border: '1px solid #cbd5e1', borderRadius: 6, width: '100%' }}
+                        />
+                        {valueSuggestIdx === idx && (
+                          <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, boxShadow: '0 6px 18px rgba(0,0,0,0.08)', zIndex: 2000, maxHeight: 180, overflowY: 'auto', marginTop: 4 }}>
+                            {(() => {
+                              const allVals = Array.from(tagValueSuggestionsByKey.get(row.key) || []).sort((a,b) => a.localeCompare(b));
+                              const q = String(row.value || '').toLowerCase();
+                              const filtered = q ? allVals.filter(v => v.toLowerCase().includes(q)) : allVals;
+                              if (filtered.length === 0) {
+                                return <div style={{ padding: '8px 10px', color: '#64748b', fontSize: 12 }}>No matches</div>;
+                              }
+                              return filtered.map(v => (
+                                <div
+                                  key={row.key + ':' + v}
+                                  onMouseDown={(e) => { e.preventDefault(); }}
+                                  onClick={() => {
+                                    setTagsRows(prev => prev.map((r, i) => i === idx ? { ...r, value: v } : r));
+                                    setValueSuggestIdx(null);
+                                  }}
+                                  style={{ padding: '8px 10px', cursor: 'pointer' }}
+                                  onMouseEnter={(e) => { e.currentTarget.style.background = '#f8fafc'; }}
+                                  onMouseLeave={(e) => { e.currentTarget.style.background = '#fff'; }}
+                                >{v}</div>
+                              ));
+                            })()}
+                          </div>
+                        )}
+                      </div>
                       <button type="button" title="Remove" onClick={() => setTagsRows(prev => {
                         const next = prev.filter((_, i) => i !== idx);
                         return next.length > 0 ? next : [{ key: '', value: '' }];
@@ -1967,8 +2386,24 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                 </div>
                 <div style={{ display: 'flex', gap: 8, marginTop: 10, justifyContent: 'flex-end' }}>
                   <button onClick={close} style={{ padding: '8px 12px', border: '1px solid #cbd5e1', borderRadius: 6, background: '#fff' }}>Cancel</button>
-                  <button onClick={save} style={{ padding: '8px 12px', background: '#2563eb', color: '#fff', border: 'none', borderRadius: 6 }}>Save</button>
+                  <button onClick={save} disabled={savingTags} style={{ padding: '8px 12px', background: savingTags ? '#93c5fd' : '#2563eb', color: '#fff', border: 'none', borderRadius: 6, display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                    {savingTags && <span className="spinner spinner-sm" aria-label="Saving" />}
+                    {savingTags ? 'Saving…' : 'Save'}
+                  </button>
                 </div>
+                {/* Resize handle */}
+                <div
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    tagsResizeRef.current.active = true;
+                    tagsResizeRef.current.startX = e.clientX;
+                    tagsResizeRef.current.startY = e.clientY;
+                    tagsResizeRef.current.startW = tagsModalSize.w;
+                    tagsResizeRef.current.startH = tagsModalSize.h;
+                  }}
+                  title="Resize"
+                  style={{ position: 'absolute', right: 2, bottom: 2, width: 16, height: 16, cursor: 'nwse-resize', opacity: 0.7, borderRight: '2px solid #cbd5e1', borderBottom: '2px solid #cbd5e1', borderRadius: 2 }}
+                />
               </div>
             </div>
           );
@@ -1981,7 +2416,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   const renderSubfoldersOnly = (path) => {
     const safe = normalizeFolderPath(path || ROOT_PATH);
     const actualFolders = new Set([...storageFolders]);
-    const subfolders = Array.from(actualFolders)
+    let subfolders = Array.from(actualFolders)
       .filter(folder => {
         const relativePath = folder.substring(safe.length);
         const isDirectChild = folder.startsWith(safe) && folder !== safe && relativePath.split('/').filter(p => p).length === 1;
@@ -1998,6 +2433,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
         const nameB = b.substring(safe.length).replace('/', '').toLowerCase();
         return nameA.localeCompare(nameB);
       });
+  // Reviews-based folder filter removed
 
   // If there are no direct subfolders, don't render an empty-state box — just render nothing.
   if (subfolders.length === 0) return null;
@@ -2058,6 +2494,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                       onChange={(e) => { e.stopPropagation(); toggleSelectFolder(folderPath); }}
                       title="Select folder"
                     />
+                    {/* Review badges removed */}
                     <button className="icon-btn rename" title="Rename" onClick={async () => {
                       const newName = prompt('Enter new folder name:', folderName);
                       if (!newName || !newName.trim() || newName.trim() === folderName) return;
@@ -2066,17 +2503,39 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                     }}>
                       <FaEdit />
                     </button>
-                    <button className="icon-btn copy" title="Copy" onClick={() => { setMoveCopyModal({ open: true, mode: 'copy', itemType: 'folder', target: folderPath, dest: normalizeFolderPath(currentPath || ROOT_PATH) }); }}>
-                      <FaCopy />
-                    </button>
-                    <button className="icon-btn move" title="Move" onClick={() => { setMoveCopyModal({ open: true, mode: 'move', itemType: 'folder', target: folderPath, dest: normalizeFolderPath(currentPath || ROOT_PATH) }); }}>
-                      <FaCut />
-                    </button>
-                    {userRole === 'admin' && (
-                      <button className="icon-btn delete" title="Delete" onClick={async () => { await confirmAndDeleteFolder(folderPath); }}>
-                        <FaTrash />
+                    {/* Compact More menu for folder actions */}
+                    <div style={{ position: 'relative' }}>
+                      <button className="icon-btn" title="More" onClick={(e) => { e.stopPropagation(); setMoreMenu({ open: true, kind: 'folder', target: folderPath }); }}>
+                        <FaEllipsisH />
                       </button>
-                    )}
+                      {moreMenu.open && moreMenu.kind === 'folder' && moreMenu.target === folderPath && (
+                        <div
+                          className="inline-menu"
+                          style={{ position: 'absolute', right: 0, top: '100%', marginTop: 6, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8, boxShadow: '0 8px 24px rgba(0,0,0,0.12)', minWidth: 220, zIndex: 3000 }}
+                          onMouseDown={(e)=>e.stopPropagation()}
+                          onClick={(e)=>e.stopPropagation()}
+                        >
+                          <div className="menu-item" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { setMoreMenu({ open: false, kind: null, target: null }); setMoveCopyModal({ open: true, mode: 'copy', itemType: 'folder', target: folderPath, dest: normalizeFolderPath(currentPath || ROOT_PATH) }); }}>
+                            <FaCopy /> Copy
+                          </div>
+                          <div className="menu-item" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { setMoreMenu({ open: false, kind: null, target: null }); setMoveCopyModal({ open: true, mode: 'move', itemType: 'folder', target: folderPath, dest: normalizeFolderPath(currentPath || ROOT_PATH) }); }}>
+                            <FaCut /> Move
+                          </div>
+                          {/* Send for review */}
+                          <div className="menu-item" style={{ padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { setMoreMenu({ open: false, kind: null, target: null }); setReviewModal({ open: true, type: 'folder', target: folderPath }); }}>
+                            📨 Send for review
+                          </div>
+                          <div className="menu-item" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { setMoreMenu({ open: false, kind: null, target: null }); showFolderDetails(folderPath); }}>
+                            <FaInfoCircle /> Details
+                          </div>
+                          {userRole === 'admin' && (
+                            <div className="menu-item danger" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={async () => { setMoreMenu({ open: false, kind: null, target: null }); await confirmAndDeleteFolder(folderPath); }}>
+                              <FaTrash /> Delete
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 )}
               </div>
@@ -2299,7 +2758,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
       
       
       
-      {(() => {
+  {(() => {
         const safe = normalizeFolderPath(currentPath || ROOT_PATH);
         const fc = folderCounts[safe];
         // Prefer cached counts; fall back to quick local compute; show … if loading
@@ -2316,55 +2775,41 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
           </div>
         );
       })()}
-      {/* Context Menu UI */}
+      {/* Custom context menu */}
       {contextMenu.visible && (
-        <div ref={menuRef} className="context-menu" role="menu" aria-label={contextMenu.type === 'file' ? 'File actions' : contextMenu.type === 'folder' ? 'Folder actions' : 'Actions'} style={{ position: 'fixed', top: contextMenu.y, left: contextMenu.x, zIndex: 9999, background: '#fff', border: '1px solid #ccc', borderRadius: '6px', boxShadow: '0 4px 16px rgba(0,0,0,0.18)', minWidth: '200px', padding: '4px 0' }} onMouseLeave={hideContextMenu}>
+        <div
+          ref={menuRef}
+          className="context-menu"
+          style={{ position: 'fixed', top: contextMenu.y, left: contextMenu.x, zIndex: 10000, background: '#fff', border: '1px solid #ddd', borderRadius: 8, boxShadow: '0 8px 24px rgba(0,0,0,0.12)', minWidth: 220 }}
+          onContextMenu={(e) => e.preventDefault()}
+        >
           {contextMenu.type === 'folder' && (
             <>
-              <div className="context-menu-title" style={{ padding: '8px 16px', fontWeight: 'bold', color: '#444', borderBottom: '1px solid #eee' }}>Folder Actions</div>
-              <div className="context-menu-item" role="menuitem" tabIndex={0} style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-folder')} onKeyDown={(e)=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); handleMenuAction('create-folder'); }}}>📁 New Subfolder <span className="plus-icon">+</span></div>
-              <div className="context-menu-item" role="menuitem" tabIndex={0} style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-file')} onKeyDown={(e)=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); handleMenuAction('create-file'); }}}>📄 New File</div>
+              <div className="context-menu-title" style={{ padding: '8px 16px', fontWeight: 'bold', color: '#444', borderBottom: '1px solid #eee' }}>Folder</div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('rename')}>✏️ Rename</div>
-              {(userRole === 'admin') ? (
-                <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer', color: '#d9534f' }} onClick={() => handleMenuAction('delete')}>🗑️ Delete</div>
-              ) : (
-                <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer', color: '#f59e42' }} onClick={() => handleMenuAction('delete')}>📝 Request Delete</div>
-              )}
-              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => { setClipboard({ action: 'copy', itemType: 'folder', payload: contextMenu.target }); hideContextMenu(); }}>📋 Copy</div>
-              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => { setClipboard({ action: 'cut', itemType: 'folder', payload: contextMenu.target }); hideContextMenu(); }}>✂️ Cut</div>
-              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: clipboard ? 'pointer' : 'not-allowed', opacity: clipboard ? 1 : 0.5 }} onClick={() => { if (clipboard) pasteIntoFolder(contextMenu.target); }}>📎 Paste here</div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('copy')}>📄 Copy</div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('move')}>📦 Move (picker)</div>
-              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('download')}>⬇️ Download (.zip)</div>
-              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('favorite')}>{favoriteFolders.has(contextMenu.target) ? '⭐ Unfavorite' : '☆ Favorite'}</div>
-              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('labels')}>🏷️ Edit labels</div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer', color: '#b42318' }} onClick={() => handleMenuAction('delete')}>🗑️ Delete</div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('details')}>ℹ️ Details</div>
             </>
           )}
           {contextMenu.type === 'file' && (
             <>
-              <div className="context-menu-title" style={{ padding: '8px 16px', fontWeight: 'bold', color: '#444', borderBottom: '1px solid #eee' }}>File Actions</div>
-              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-file')}>📄 New File</div>
-              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-folder')}>📁 New Folder <span className="plus-icon">+</span></div>
+              <div className="context-menu-title" style={{ padding: '8px 16px', fontWeight: 'bold', color: '#444', borderBottom: '1px solid #eee' }}>File</div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('rename')}>✏️ Rename</div>
-              {(userRole === 'admin') ? (
-                <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer', color: '#d9534f' }} onClick={() => handleMenuAction('delete')}>🗑️ Delete</div>
-              ) : (
-                <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer', color: '#f59e42' }} onClick={() => handleMenuAction('delete')}>📝 Request Delete</div>
-              )}
-              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => { setClipboard({ action: 'copy', itemType: 'file', payload: contextMenu.target }); hideContextMenu(); }}>📋 Copy</div>
-              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => { setClipboard({ action: 'cut', itemType: 'file', payload: contextMenu.target }); hideContextMenu(); }}>✂️ Cut</div>
-              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: clipboard ? 'pointer' : 'not-allowed', opacity: clipboard ? 1 : 0.5 }} onClick={() => { if (clipboard) pasteIntoFolder(getParentFolderPath(contextMenu.target)); }}>📎 Paste into this folder</div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('copy')}>📄 Copy</div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('move')}>📦 Move (picker)</div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer', color: '#b42318' }} onClick={() => handleMenuAction('delete')}>🗑️ Delete</div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('download')}>⬇️ Download</div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('details')}>ℹ️ Details</div>
             </>
           )}
-      {contextMenu.type === 'background' && (
+          {contextMenu.type === 'background' && (
             <>
               <div className="context-menu-title" style={{ padding: '8px 16px', fontWeight: 'bold', color: '#444', borderBottom: '1px solid #eee' }}>Here</div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-folder')}>📁 New Folder <span className="plus-icon">+</span></div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-file')}>📄 New File</div>
-        <div className="context-menu-item" style={{ padding: '8px 16px', cursor: clipboard ? 'pointer' : 'not-allowed', opacity: clipboard ? 1 : 0.5 }} onClick={() => { if (clipboard) pasteIntoFolder(normalizeFolderPath(currentPath)); }}>📎 Paste</div>
+              <div className="context-menu-item" style={{ padding: '8px 16px', cursor: clipboard ? 'pointer' : 'not-allowed', opacity: clipboard ? 1 : 0.5 }} onClick={() => { if (clipboard) pasteIntoFolder(normalizeFolderPath(currentPath)); }}>📎 Paste</div>
             </>
           )}
         </div>
@@ -2388,11 +2833,12 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
       )}
       {/* Success/Error Popup */}
       {showSuccessPopup && (
-        <div className="success-popup" role="status" aria-live="polite" style={{ position: 'fixed', top: 60, left: '50%', transform: 'translateX(-50%)', zIndex: 10001, background: isError ? '#ffeaea' : '#eaffea', border: '1px solid #ccc', borderRadius: '4px', padding: '12px', boxShadow: '0 2px 8px rgba(0,0,0,0.15)' }}>
+        <div className="success-popup" role="status" aria-live="polite" style={{ position: 'fixed', bottom: 20, right: 20, zIndex: 20000, background: isError ? '#ffeaea' : '#eaffea', border: '1px solid #ccc', borderRadius: '6px', padding: '10px 12px', boxShadow: '0 6px 18px rgba(0,0,0,0.2)', maxWidth: 420 }}>
           {successMessage}
           <button style={{ marginLeft: '12px' }} onClick={() => setShowSuccessPopup(false)}>Close</button>
         </div>
       )}
+  {/* Review Modal removed */}
       {/* Label Editor Modal */}
       {labelEditor.open && (
         <div className="label-editor-modal" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10003 }}>
@@ -2568,6 +3014,202 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                   </button>
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {reviewModal.open && (
+        <div className="move-copy-modal" role="dialog" aria-modal="true" aria-labelledby="review-title" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10002 }} onKeyDown={(e) => {
+          if (e.key === 'Escape' && !reviewSubmitting) setReviewModal({ open: false, type: null, target: null });
+          if (e.key === 'Enter' && !reviewSubmitting) (document.getElementById('confirm-send-review') || {}).click?.();
+        }}>
+          <div style={{ background: '#fff', width: '560px', maxWidth: '95vw', borderRadius: 8, overflow: 'hidden', boxShadow: '0 12px 28px rgba(0,0,0,0.25)' }}>
+            <div style={{ padding: '12px 16px', borderBottom: '1px solid #eee', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div id="review-title" style={{ fontWeight: 600 }}>Send for review</div>
+              <button onClick={() => { if (!reviewSubmitting) setReviewModal({ open: false, type: null, target: null }); }} style={{ border: 'none', background: 'transparent', fontSize: 18, cursor: 'pointer' }}>✕</button>
+            </div>
+            <div style={{ padding: 16, display: 'grid', gap: 12 }}>
+              <div>
+                <div style={{ marginBottom: 6, color: '#666', fontSize: 13 }}>Assign to admin</div>
+                <select value={reviewAssignee} onChange={e => setReviewAssignee(e.target.value)} style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #ccc' }}>
+                  <option value="">Select…</option>
+                  {reviewAdmins.map(a => (<option key={a.id} value={a.id}>{a.username || a.email || a.id}</option>))}
+                </select>
+              </div>
+              <div style={{ fontSize: 13, color: '#555' }}>
+                Target:{' '}
+                {reviewModal.type === 'file' ? (reviewModal.target?.name || reviewModal.target?.fullPath || reviewModal.target?.ref?.fullPath) : String(reviewModal.target || '')}
+              </div>
+            </div>
+            <div style={{ padding: '12px 16px', borderTop: '1px solid #eee', display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button onClick={() => { if (!reviewSubmitting) setReviewModal({ open: false, type: null, target: null }); }} style={{ padding: '8px 12px' }} disabled={reviewSubmitting}>Cancel</button>
+              <button id="confirm-send-review" onClick={async () => {
+                if (!reviewAssignee || reviewSubmitting) return;
+                setReviewSubmitting(true);
+                try {
+                  const cur = auth?.currentUser;
+                  const base = reviewModal.type === 'file' ? {
+                    targetType: 'file',
+                    fileId: reviewModal.target?.id || null,
+                    fileName: reviewModal.target?.name || null,
+                    fullPath: reviewModal.target?.fullPath || reviewModal.target?.ref?.fullPath || null,
+                    path: reviewModal.target?.path || null,
+                  } : {
+                    targetType: 'folder',
+                    fileId: null,
+                    fileName: null,
+                    fullPath: String(reviewModal.target || ''),
+                    path: String(reviewModal.target || ''),
+                  };
+                  await addDoc(collection(db, 'reviews'), {
+                    ...base,
+                    assignedTo: reviewAssignee,
+                    assignedToEmail: (reviewAdmins.find(a => a.id === reviewAssignee)?.email) || null,
+                    requestedBy: cur?.uid || null,
+                    requestedByEmail: cur?.email || null,
+                    status: 'pending',
+                    requestedAt: serverTimestamp(),
+                  });
+                  setReviewModal({ open: false, type: null, target: null });
+                  setReviewAssignee('');
+                  try { window.dispatchEvent(new CustomEvent('file-action-success', { detail: { message: 'Sent for review' } })); } catch {}
+                } catch (e) {
+                  console.error('send review error', e);
+                  alert('Failed to send for review');
+                } finally {
+                  setReviewSubmitting(false);
+                }
+              }} style={{ padding: '8px 12px', background: reviewSubmitting ? '#6ea8fe' : '#0b5ed7', color: '#fff', border: 'none', borderRadius: 6 }} disabled={reviewSubmitting || !reviewAssignee}>{reviewSubmitting ? 'Sending…' : 'Send'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {bulkReviewModal.open && (
+        <div className="move-copy-modal" role="dialog" aria-modal="true" aria-labelledby="bulk-review-title" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10002 }} onKeyDown={(e) => {
+          if (e.key === 'Escape' && !bulkReviewSubmitting) setBulkReviewModal({ open: false, fileIds: [] });
+          if (e.key === 'Enter' && !bulkReviewSubmitting) (document.getElementById('confirm-bulk-send-review') || {}).click?.();
+        }}>
+          <div style={{ background: '#fff', width: '560px', maxWidth: '95vw', borderRadius: 8, overflow: 'hidden', boxShadow: '0 12px 28px rgba(0,0,0,0.25)' }}>
+            <div style={{ padding: '12px 16px', borderBottom: '1px solid #eee', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div id="bulk-review-title" style={{ fontWeight: 600 }}>Send {bulkReviewModal.fileIds.length} file(s) for review</div>
+              <button onClick={() => { if (!bulkReviewSubmitting) setBulkReviewModal({ open: false, fileIds: [] }); }} style={{ border: 'none', background: 'transparent', fontSize: 18, cursor: 'pointer' }}>✕</button>
+            </div>
+            <div style={{ padding: 16, display: 'grid', gap: 12 }}>
+              <div>
+                <div style={{ marginBottom: 6, color: '#666', fontSize: 13 }}>Assign to admin</div>
+                <select value={reviewAssignee} onChange={e => setReviewAssignee(e.target.value)} style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #ccc' }}>
+                  <option value="">Select…</option>
+                  {reviewAdmins.map(a => (<option key={a.id} value={a.id}>{a.username || a.email || a.id}</option>))}
+                </select>
+              </div>
+            </div>
+            <div style={{ padding: '12px 16px', borderTop: '1px solid #eee', display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button onClick={() => { if (!bulkReviewSubmitting) setBulkReviewModal({ open: false, fileIds: [] }); }} style={{ padding: '8px 12px' }} disabled={bulkReviewSubmitting}>Cancel</button>
+              <button id="confirm-bulk-send-review" onClick={async () => {
+                if (!reviewAssignee || bulkReviewSubmitting) return;
+                setBulkReviewSubmitting(true);
+                try {
+                  const cur = auth?.currentUser;
+                  const idSet = new Set(bulkReviewModal.fileIds);
+                  const files = storageFiles.filter(f => idSet.has(f.id));
+                  const tasks = files.map((f) => addDoc(collection(db, 'reviews'), {
+                    targetType: 'file',
+                    fileId: f.id,
+                    fileName: f.name || null,
+                    fullPath: f.ref?.fullPath || f.id,
+                    path: f.path || null,
+                    assignedTo: reviewAssignee,
+                    assignedToEmail: (reviewAdmins.find(a => a.id === reviewAssignee)?.email) || null,
+                    requestedBy: cur?.uid || null,
+                    requestedByEmail: cur?.email || null,
+                    status: 'pending',
+                    requestedAt: serverTimestamp(),
+                  }));
+                  await Promise.allSettled(tasks);
+                  setBulkReviewModal({ open: false, fileIds: [] });
+                  setReviewAssignee('');
+                  try { window.dispatchEvent(new CustomEvent('file-action-success', { detail: { message: 'Sent for review' } })); } catch {}
+                } catch (e) {
+                  console.error('bulk send review error', e);
+                  alert('Failed to send some items for review');
+                } finally {
+                  setBulkReviewSubmitting(false);
+                }
+              }} style={{ padding: '8px 12px', background: bulkReviewSubmitting ? '#6ea8fe' : '#0b5ed7', color: '#fff', border: 'none', borderRadius: 6 }} disabled={bulkReviewSubmitting || !reviewAssignee}>{bulkReviewSubmitting ? 'Sending…' : 'Send'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {bulkTagsModal.open && (
+        <div className="move-copy-modal" role="dialog" aria-modal="true" aria-labelledby="bulk-tags-title" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10002 }} onKeyDown={(e) => {
+          if (e.key === 'Escape') setBulkTagsModal({ open: false });
+          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) (document.getElementById('confirm-bulk-tags') || {}).click?.();
+        }}>
+          <div style={{ background: '#fff', width: '560px', maxWidth: '95vw', borderRadius: 8, overflow: 'hidden', boxShadow: '0 12px 28px rgba(0,0,0,0.25)' }}>
+            <div style={{ padding: '12px 16px', borderBottom: '1px solid #eee', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div id="bulk-tags-title" style={{ fontWeight: 600 }}>Add tags to selected files</div>
+              <button onClick={() => setBulkTagsModal({ open: false })} style={{ border: 'none', background: 'transparent', fontSize: 18, cursor: 'pointer' }}>✕</button>
+            </div>
+            <div style={{ padding: 16, display: 'grid', gap: 10 }}>
+              <div style={{ fontSize: 13, color: '#555' }}>Enter tags to add or update for all selected files. Use one per line in the form Key: Value.</div>
+              <textarea value={bulkTagsText} onChange={(e) => setBulkTagsText(e.target.value)} placeholder={"ProjectName: ACME\nDate: 2024-12-31"} style={{ minHeight: 140, padding: '10px', border: '1px solid #d1d5db', borderRadius: 6 }} />
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+                <input type="checkbox" checked={bulkTagsOverwrite} onChange={(e) => setBulkTagsOverwrite(e.target.checked)} /> Overwrite these keys if present
+              </label>
+            </div>
+            <div style={{ padding: '12px 16px', borderTop: '1px solid #eee', display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button onClick={() => setBulkTagsModal({ open: false })} style={{ padding: '8px 12px' }}>Cancel</button>
+              <button id="confirm-bulk-tags" onClick={async () => {
+                // Parse tags
+                const lines = String(bulkTagsText || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+                const entries = [];
+                for (const ln of lines) {
+                  const m = ln.split(/[:=]/);
+                  if (m.length >= 2) {
+                    const k = m[0].trim();
+                    const v = m.slice(1).join(':').trim();
+                    if (k) entries.push([k, v]);
+                  }
+                }
+                if (entries.length === 0) { alert('Enter at least one tag.'); return; }
+                try {
+                  const idSet = new Set(Array.from(selectedFiles));
+                  const files = storageFiles.filter(f => idSet.has(f.id));
+                  if (!files.length) { alert('No files selected.'); return; }
+                  const BATCH = 4;
+                  let idx = 0; let updated = 0; let skipped = 0; let failed = 0;
+                  const runners = Array(Math.min(BATCH, files.length)).fill(0).map(async () => {
+                    while (idx < files.length) {
+                      const i = idx++;
+                      const f = files[i];
+                      try {
+                        // Find corresponding Firestore 'files' doc by fullPath
+                        const full = f.ref?.fullPath || f.id;
+                        const q = fsQuery(collection(db, 'files'), where('fullPath', '==', full));
+                        const snap = await getDocs(q);
+                        if (snap.empty) { skipped++; continue; }
+                        const docRef = snap.docs[0].ref;
+                        const data = snap.docs[0].data() || {};
+                        const current = (data.tags && typeof data.tags === 'object') ? { ...data.tags } : {};
+                        for (const [k, v] of entries) {
+                          if (bulkTagsOverwrite || !Object.prototype.hasOwnProperty.call(current, k)) current[k] = v;
+                          else current[k] = v; // overwrite when checkbox set; already handled
+                        }
+                        await setDoc(docRef, { tags: current, updatedAt: serverTimestamp() }, { merge: true });
+                        updated++;
+                      } catch (_) {
+                        failed++;
+                      }
+                    }
+                  });
+                  await Promise.allSettled(runners);
+                  setBulkTagsModal({ open: false });
+                  setBulkTagsText('');
+                  try { window.dispatchEvent(new CustomEvent('file-action-success', { detail: { message: `Tags updated: ${updated}, skipped: ${skipped}${failed ? `, failed: ${failed}` : ''}` } })); } catch {}
+                } catch (e) {
+                  alert('Failed to update tags');
+                }
+              }} style={{ padding: '8px 12px', background: '#0b5ed7', color: '#fff', border: 'none', borderRadius: 6 }}>Apply</button>
             </div>
           </div>
         </div>

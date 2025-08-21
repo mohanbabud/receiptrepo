@@ -25,6 +25,8 @@ const Login = () => {
         return 'No account found with that email.';
       case 'auth/wrong-password':
         return 'Incorrect password. Try again.';
+      case 'auth/invalid-credential':
+        return 'Incorrect email or password. Try again.';
       case 'auth/too-many-requests':
         return 'Too many attempts. Please wait a moment and try again.';
       default:
@@ -41,24 +43,31 @@ const Login = () => {
   setResetMessage('');
 
     try {
-      // Sign in existing user
-      const userCredential = await signInWithEmailAndPassword(auth, email, password);
+      // 1) Sign in existing user (Auth errors should surface to the UI)
+      const emailToUse = (email || '').trim();
+      const userCredential = await signInWithEmailAndPassword(auth, emailToUse, password);
       const user = userCredential.user;
 
-      // Ensure user document exists with a default role for Storage/Firestore rules
-      const userDocRef = doc(db, 'users', user.uid);
-      const userDoc = await getDoc(userDocRef);
-      if (!userDoc.exists()) {
-        await setDoc(userDocRef, {
-          email: user.email || '',
-          username: '',
-          role: 'user',
-          createdAt: new Date(),
-          lastLogin: new Date()
-        });
-      } else {
-        // Update last login if already exists
-        await setDoc(userDocRef, { lastLogin: new Date() }, { merge: true });
+      // 2) Best-effort profile ensure in Firestore. DO NOT block sign-in if this fails
+      try {
+        const userDocRef = doc(db, 'users', user.uid);
+        const userDoc = await getDoc(userDocRef);
+        if (!userDoc.exists()) {
+          await setDoc(userDocRef, {
+            email: user.email || '',
+            username: '',
+            role: 'user',
+            createdAt: new Date(),
+            lastLogin: new Date()
+          });
+        } else {
+          // Update last login if already exists
+          await setDoc(userDocRef, { lastLogin: new Date() }, { merge: true });
+        }
+      } catch (profileErr) {
+        // eslint-disable-next-line no-console
+        console.warn('[Login] Profile ensure failed (non-blocking):', profileErr && (profileErr.code || profileErr.message));
+        // Continue — Auth succeeded, router will redirect based on onAuthStateChanged
       }
     } catch (error) {
       setError(mapAuthError(error.code, error.message));
@@ -93,7 +102,7 @@ const Login = () => {
         
         <form onSubmit={handleSubmit}>
           <div className="form-group">
-            <label htmlFor="email">Email</label>
+            <label htmlFor="email">Email (not username)</label>
             <input
               type="email"
               id="email"
@@ -104,6 +113,7 @@ const Login = () => {
               autoFocus
               aria-invalid={!!error && !isValidEmail}
             />
+            <small className="hint">Use the email assigned to the user (e.g. test@example.com).</small>
           </div>
           
           <div className="form-group">
@@ -137,7 +147,7 @@ const Login = () => {
           <button 
             type="submit" 
             className="login-btn"
-            disabled={loading || !isValidEmail || password.length < 6}
+            disabled={loading || password.length < 6}
           >
             {loading ? 'Signing in…' : 'Sign In'}
           </button>

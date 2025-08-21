@@ -19,7 +19,7 @@
     "firebase": "^12.1.0",
     "jszip": "^3.10.1",
     "pdf-lib": "^1.17.1",
-    "pdfjs-dist": "5.3.93",
+  "pdfjs-dist": "5.3.93",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-dropzone": "^14.2.3",
@@ -34,12 +34,15 @@
     "web-vitals": "^3.5.2"
   },
   "scripts": {
-    "start": "react-scripts start",
+  "start": "react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test",
     "eject": "react-scripts eject",
     "deploy": "npm run build && firebase deploy",
-    "postinstall": "node scripts/copy-pdf-worker.cjs"
+  "postinstall": "node scripts/copy-pdf-worker.cjs",
+  "dev:kill": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/kill-dev.ps1",
+  "start:3000": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/start-dev.ps1 -Port 3000",
+  "dev:restart": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/dev-restart.ps1 -Port 3000"
   },
   "eslintConfig": {
     "extends": [

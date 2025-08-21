@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 
-// Use the same local worker we copied to public/
-pdfjs.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
+// Always use the classic JS worker served from public to avoid module-worker issues
+pdfjs.GlobalWorkerOptions.workerSrc = `${process.env.PUBLIC_URL || ''}/pdf.worker.min.js`;
 
-const PdfPlainViewer = ({ url, height = 600 }) => {
+const PdfPlainViewer = ({ url, height = 600, rotate = 0 }) => {
   const [numPages, setNumPages] = useState(null);
   const [page, setPage] = useState(1);
   const [error, setError] = useState('');
@@ -50,7 +50,14 @@ const PdfPlainViewer = ({ url, height = 600 }) => {
       {error && <div className="message error">❌ {error}</div>}
       <div style={{ display: 'flex', justifyContent: 'center' }}>
         <Document file={url} onLoadSuccess={onDocumentLoadSuccess} onLoadError={(e) => setError(e?.message || 'Failed to load PDF')}>
-          <Page pageNumber={page} width={width} height={height} renderAnnotationLayer={false} renderTextLayer={false} />
+          <Page
+            pageNumber={page}
+            width={width}
+            height={height}
+            renderAnnotationLayer={false}
+            renderTextLayer={false}
+            rotate={rotate}
+          />
         </Document>
       </div>
     </div>

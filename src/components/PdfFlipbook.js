@@ -2,10 +2,10 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import HTMLFlipBook from 'react-pageflip';
 import { Document, Page, pdfjs } from 'react-pdf';
 
-// Configure pdfjs worker from static public path
-pdfjs.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
+// Always use the classic JS worker served from public to avoid module-worker issues
+pdfjs.GlobalWorkerOptions.workerSrc = `${process.env.PUBLIC_URL || ''}/pdf.worker.min.js`;
 
-const PdfFlipbook = ({ url, height = 600 }) => {
+const PdfFlipbook = ({ url, height = 600, rotate = 0 }) => {
   const [numPages, setNumPages] = useState(null);
   const [error, setError] = useState('');
   const [width, setWidth] = useState(420);
@@ -35,9 +35,9 @@ const PdfFlipbook = ({ url, height = 600 }) => {
       <Document file={url} onLoadSuccess={onDocumentLoadSuccess} onLoadError={(e) => setError(e?.message || 'Failed to load PDF')}>
         {numPages ? (
           <HTMLFlipBook width={width} height={height} size="stretch" minWidth={280} maxWidth={1024} minHeight={320} maxHeight={1200} drawShadow={true} showCover={false} mobileScrollSupport={true} usePortrait={true}>
-            {Array.from({ length: numPages }, (_, i) => (
+      {Array.from({ length: numPages }, (_, i) => (
               <div key={i} className="page" style={{ background: '#fff' }}>
-                <Page pageNumber={i + 1} width={width} renderAnnotationLayer={false} renderTextLayer={false} />
+        <Page pageNumber={i + 1} width={width} renderAnnotationLayer={false} renderTextLayer={false} rotate={rotate} />
               </div>
             ))}
           </HTMLFlipBook>

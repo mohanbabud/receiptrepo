@@ -6,10 +6,19 @@ service cloud.firestore {
              get(/databases/$(database)/documents/users/$(uid)).data.role == 'admin';
     }
 
+    function isEditor(uid) {
+      return exists(/databases/$(database)/documents/users/$(uid)) &&
+             get(/databases/$(database)/documents/users/$(uid)).data.role == 'editor';
+    }
+
     // Users collection
     match /users/{userId} {
-      // Read own doc or any doc if admin
-      allow read: if request.auth != null && (request.auth.uid == userId || isAdmin(request.auth.uid));
+      // Read own doc, any doc if admin, or any admin doc (for reviewer directory)
+      allow read: if request.auth != null && (
+        request.auth.uid == userId ||
+        isAdmin(request.auth.uid) ||
+        resource.data.role == 'admin'
+      );
 
       // Create own doc only as non-admin role (viewer/user); admins may create any
       allow create: if request.auth != null && request.auth.uid == userId &&
@@ -25,15 +34,20 @@ service cloud.firestore {
     // Files collection - role-based access
     match /files/{fileId} {
       allow read: if request.auth != null;
+      // Allow users, editors, and admins to create file metadata
       allow create: if request.auth != null &&
         exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['user', 'admin'];
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['user', 'editor', 'admin'];
       // Allow admins to update/delete any file
       allow update, delete: if request.auth != null && isAdmin(request.auth.uid);
-  // Allow owners to update tags only (other fields must remain unchanged)
+      // Allow owners to update tags (and updatedAt stamp) only
       allow update: if request.auth != null &&
         resource.data.uploadedByUid == request.auth.uid &&
-        request.resource.data.diff(resource.data).changedKeys().hasOnly(['tags']);
+        request.resource.data.diff(resource.data).changedKeys().hasOnly(['tags', 'updatedAt']);
+      // Allow editors to update tags (and updatedAt) without ownership
+      allow update: if request.auth != null &&
+        isEditor(request.auth.uid) &&
+        request.resource.data.diff(resource.data).changedKeys().hasOnly(['tags', 'updatedAt']);
     }
     
     // Requests collection - users can create and read their own, admins can read/update all
@@ -48,11 +62,30 @@ service cloud.firestore {
         isAdmin(request.auth.uid);
     }
 
+    // Reviews collection
+    match /reviews/{reviewId} {
+      // Users can create their own review requests
+      allow create: if request.auth != null && request.auth.uid == request.resource.data.requestedBy;
+      // Requester can read their own; admins can read all
+      allow read: if request.auth != null && (request.auth.uid == resource.data.requestedBy || isAdmin(request.auth.uid));
+      // Only admins can update (e.g., mark reviewed / rejected)
+      allow update: if request.auth != null && isAdmin(request.auth.uid);
+      // No deletes from clients
+    }
+
     // Global folder metadata (labels: tags + color)
     match /folders_meta/{docId} {
       // Any signed-in user can read labels
       allow read: if request.auth != null;
       // Only admins can write labels
+      allow create, update, delete: if request.auth != null && isAdmin(request.auth.uid);
+    }
+
+    // Tags Catalog (keys and suggestion values)
+    match /tags_catalog/{keyId} {
+      // Let any signed-in user read available tag keys/values
+      allow read: if request.auth != null;
+      // Only admins can modify the catalog entries
       allow create, update, delete: if request.auth != null && isAdmin(request.auth.uid);
     }
     
