@@ -112,7 +112,8 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
       return () => { unsub && unsub(); };
     } catch (_) { /* ignore */ }
   }, []);
-  const [moreMenu, setMoreMenu] = useState({ open: false, kind: null, target: null }); // kind: 'file' | 'folder'
+  // Global compact "More" menu (file/folder) now uses viewport-fixed positioning to avoid z-index clipping
+  const [moreMenu, setMoreMenu] = useState({ open: false, kind: null, target: null, x: 0, y: 0 }); // kind: 'file' | 'folder'
 
   // Catalog for tag suggestions from Firestore (global)
   const [catalogKeys, setCatalogKeys] = useState([]);
@@ -2017,7 +2018,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
               key={file.id}
               className={`file-grid-item ${selection.type === 'file' && selection.target?.id === file.id ? 'selected' : ''}`}
               onClick={() => setSelection({ type: 'file', target: file })}
-              onDoubleClick={() => previewFile(file)}
+              /* Removed row double-click preview: open now only via filename click or Preview icon */
               onContextMenu={e => handleContextMenu(e, file, 'file')}
               title={file.name}
               role="row"
@@ -2049,7 +2050,13 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                   />
                 ) : (
                   <>
-                    <span className="file-name" title={file.name} onDoubleClick={() => { setEditingFileId(file.id); setEditingName(file.name); }}>{file.name}</span>
+                    <span
+                      className="file-name"
+                      title={file.name}
+                      onClick={(e) => { e.stopPropagation(); setSelection({ type: 'file', target: file }); previewFile(file); }}
+                    >
+                      {file.name}
+                    </span>
                     {(() => {
                       const pathKey = file.fullPath || file?.ref?.fullPath || file.path;
                       const isPending = pendingFileIds.has(file.id) || pendingPaths.has(pathKey);
@@ -2086,8 +2093,17 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
               <div className="file-actions" style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto', paddingRight: 8 }} onClick={e => e.stopPropagation()}>
                 {/* Tags popover shown only when the tag button is clicked */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, position: 'relative' }}>
-                  {((userRole === 'admin') || (userRole === 'editor') || (auth?.currentUser && file.ownerUid === auth.currentUser.uid)) && (
-                    <button className="icon-btn tags-button" title="Tags" onClick={(e) => { e.stopPropagation(); setTagPopoverFor(prev => prev === file.id ? null : file.id); }} style={{ border: '1px solid #cbd5e1', borderRadius: 6, padding: '4px 8px', background: '#fff' }}>🏷️</button>
+                  {(userRole === 'admin' || userRole === 'editor' || userRole === 'user') && (
+                    <button
+                      className="icon-btn tags-button"
+                      title="Tags"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        try { window.dispatchEvent(new CustomEvent('debug-log', { detail: { msg: 'tags-button-click', file: file.id } })); } catch {}
+                        setTagPopoverFor(prev => prev === file.id ? null : file.id);
+                      }}
+                      style={{ border: '1px solid #cbd5e1', borderRadius: 6, padding: '4px 8px', background: '#fff' }}
+                    >🏷️</button>
                   )}
                   {tagPopoverFor === file.id && (
                     <div className="tag-popover" role="dialog" aria-label="File tags" style={{ position: 'absolute', top: 36, right: 0, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8, boxShadow: '0 8px 20px rgba(0,0,0,0.12)', padding: 10, minWidth: 220, maxWidth: 320, zIndex: 10002 }} onClick={(e) => e.stopPropagation()}>
@@ -2109,6 +2125,8 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                       {((userRole === 'admin') || (userRole === 'editor')) && (
                         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
                           <button onClick={() => {
+                            // Ensure preview panel opens for this file when editing tags
+                            try { previewFile(file); } catch {}
                             // Initialize editor rows then open full editor modal
                             const existing = (file.tags && Object.keys(file.tags).length)
                               ? Object.entries(file.tags).map(([k, v]) => ({ key: String(k), value: String(v ?? '') }))
@@ -2134,48 +2152,21 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                 </button>
                 {/* Compact More menu to reduce clutter */}
                 <div style={{ position: 'relative' }}>
-                  <button className="icon-btn" title="More" onClick={(e) => { e.stopPropagation(); setMoreMenu({ open: true, kind: 'file', target: file }); }}>
+                  <button className="icon-btn" title="More" onClick={(e) => {
+                    e.stopPropagation();
+                    try {
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      const vpW = window.innerWidth || 0; const vpH = window.innerHeight || 0;
+                      let x = rect.right + 4; let y = rect.top + rect.height + 4;
+                      // Basic viewport collision adjustment
+                      if (x > vpW - 240) x = Math.max(8, rect.left - 240);
+                      if (y > vpH - 260) y = Math.max(8, rect.top - 220);
+                      setMoreMenu({ open: true, kind: 'file', target: file, x, y });
+                    } catch { setMoreMenu({ open: true, kind: 'file', target: file, x: 40, y: 40 }); }
+                  }}>
                     <FaEllipsisH />
                   </button>
-                  {moreMenu.open && moreMenu.kind === 'file' && moreMenu.target?.id === file.id && (
-                    <div
-                      className="inline-menu"
-                      style={{ minWidth: 200 }}
-                      onMouseDown={(e)=>e.stopPropagation()}
-                      onClick={(e)=>e.stopPropagation()}
-                    >
-                      {/* Send for review */}
-                      <div className="menu-item" style={{ padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { setMoreMenu({ open: false, kind: null, target: null }); setReviewModal({ open: true, type: 'file', target: file }); }}>
-                        📨 Send for review
-                      </div>
-                      {((userRole === 'admin') || (userRole === 'editor') || (auth?.currentUser && file.ownerUid === auth.currentUser.uid)) && (
-                        <div className="menu-item" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { setMoreMenu({ open: false, kind: null, target: null }); previewFile(file); setEditingTagsFor(file.id); const existing = (file.tags && Object.keys(file.tags).length) ? Object.entries(file.tags).map(([k, v]) => ({ key: String(k), value: String(v ?? '') })) : []; const existingKeys = new Set(existing.map(r => r.key)); const suggested = DEFAULT_TAG_KEYS.filter(k => !existingKeys.has(k)).map(k => ({ key: k, value: '' })); const rows = (existing.length + suggested.length) ? [...existing, ...suggested] : [{ key: '', value: '' }]; setTagsRows(rows); setTagsError(''); }}>
-                          <FaTag /> Edit tags
-                        </div>
-                      )}
-                      {userRole !== 'viewer' && (
-                        <>
-                          <div className="menu-item" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { setMoreMenu({ open: false, kind: null, target: null }); setEditingFileId(file.id); setEditingName(file.name); }}>
-                            <FaEdit /> Rename
-                          </div>
-                          <div className="menu-item" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { setMoreMenu({ open: false, kind: null, target: null }); setMoveCopyModal({ open: true, mode: 'copy', itemType: 'file', target: file, dest: normalizeFolderPath(currentPath || ROOT_PATH) }); }}>
-                            <FaCopy /> Copy
-                          </div>
-                          <div className="menu-item" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { setMoreMenu({ open: false, kind: null, target: null }); setMoveCopyModal({ open: true, mode: 'move', itemType: 'file', target: file, dest: normalizeFolderPath(currentPath || ROOT_PATH) }); }}>
-                            <FaCut /> Move
-                          </div>
-                          {userRole === 'admin' && (
-                            <div className="menu-item danger" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={async () => { setMoreMenu({ open: false, kind: null, target: null }); await confirmAndDeleteFile(file); }}>
-                              <FaTrash /> Delete
-                            </div>
-                          )}
-                        </>
-                      )}
-                      <div className="menu-item" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onClick={() => { setMoreMenu({ open: false, kind: null, target: null }); showFileDetails(file); }}>
-                        <FaInfoCircle /> Details
-                      </div>
-                    </div>
-                  )}
+                  {/* File menu now rendered globally (see bottom) */}
                 </div>
               </div>
             </div>
@@ -2505,36 +2496,20 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                     </button>
                     {/* Compact More menu for folder actions */}
                     <div style={{ position: 'relative' }}>
-                      <button className="icon-btn" title="More" onClick={(e) => { e.stopPropagation(); setMoreMenu({ open: true, kind: 'folder', target: folderPath }); }}>
+                      <button className="icon-btn" title="More" onClick={(e) => {
+                        e.stopPropagation();
+                        try {
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          const vpW = window.innerWidth || 0; const vpH = window.innerHeight || 0;
+                          let x = rect.right + 4; let y = rect.top + rect.height + 4;
+                          if (x > vpW - 240) x = Math.max(8, rect.left - 240);
+                          if (y > vpH - 260) y = Math.max(8, rect.top - 220);
+                          setMoreMenu({ open: true, kind: 'folder', target: folderPath, x, y });
+                        } catch { setMoreMenu({ open: true, kind: 'folder', target: folderPath, x: 40, y: 40 }); }
+                      }}>
                         <FaEllipsisH />
                       </button>
-                      {moreMenu.open && moreMenu.kind === 'folder' && moreMenu.target === folderPath && (
-                        <div
-                          className="inline-menu"
-                          style={{ position: 'absolute', right: 0, top: '100%', marginTop: 6, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8, boxShadow: '0 8px 24px rgba(0,0,0,0.12)', minWidth: 220, zIndex: 3000 }}
-                          onMouseDown={(e)=>e.stopPropagation()}
-                          onClick={(e)=>e.stopPropagation()}
-                        >
-                          <div className="menu-item" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { setMoreMenu({ open: false, kind: null, target: null }); setMoveCopyModal({ open: true, mode: 'copy', itemType: 'folder', target: folderPath, dest: normalizeFolderPath(currentPath || ROOT_PATH) }); }}>
-                            <FaCopy /> Copy
-                          </div>
-                          <div className="menu-item" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { setMoreMenu({ open: false, kind: null, target: null }); setMoveCopyModal({ open: true, mode: 'move', itemType: 'folder', target: folderPath, dest: normalizeFolderPath(currentPath || ROOT_PATH) }); }}>
-                            <FaCut /> Move
-                          </div>
-                          {/* Send for review */}
-                          <div className="menu-item" style={{ padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { setMoreMenu({ open: false, kind: null, target: null }); setReviewModal({ open: true, type: 'folder', target: folderPath }); }}>
-                            📨 Send for review
-                          </div>
-                          <div className="menu-item" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { setMoreMenu({ open: false, kind: null, target: null }); showFolderDetails(folderPath); }}>
-                            <FaInfoCircle /> Details
-                          </div>
-                          {userRole === 'admin' && (
-                            <div className="menu-item danger" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={async () => { setMoreMenu({ open: false, kind: null, target: null }); await confirmAndDeleteFolder(folderPath); }}>
-                              <FaTrash /> Delete
-                            </div>
-                          )}
-                        </div>
-                      )}
+                      {/* Folder menu now rendered globally (see bottom) */}
                     </div>
                   </div>
                 )}
@@ -2810,6 +2785,70 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-folder')}>📁 New Folder <span className="plus-icon">+</span></div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: 'pointer' }} onClick={() => handleMenuAction('create-file')}>📄 New File</div>
               <div className="context-menu-item" style={{ padding: '8px 16px', cursor: clipboard ? 'pointer' : 'not-allowed', opacity: clipboard ? 1 : 0.5 }} onClick={() => { if (clipboard) pasteIntoFolder(normalizeFolderPath(currentPath)); }}>📎 Paste</div>
+            </>
+          )}
+        </div>
+      )}
+      {/* Global fixed-position More (ellipsis) menu */}
+      {moreMenu.open && (
+        <div
+          className="inline-menu"
+          style={{ position: 'fixed', top: moreMenu.y, left: moreMenu.x, minWidth: 220, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8, boxShadow: '0 8px 24px rgba(0,0,0,0.16)', zIndex: 200000 }}
+          onMouseDown={(e)=>e.stopPropagation()}
+          onClick={(e)=>e.stopPropagation()}
+        >
+          {moreMenu.kind === 'file' && moreMenu.target && (
+            <>
+              <div className="menu-item" style={{ padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { setMoreMenu({ open: false, kind: null, target: null, x:0, y:0 }); setReviewModal({ open: true, type: 'file', target: moreMenu.target }); }}>
+                📨 Send for review
+              </div>
+              {((userRole === 'admin') || (userRole === 'editor') || (auth?.currentUser && moreMenu.target.ownerUid === auth.currentUser.uid)) && (
+                <div className="menu-item" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { const file = moreMenu.target; setMoreMenu({ open: false, kind: null, target: null, x:0, y:0 }); previewFile(file); setEditingTagsFor(file.id); const existing = (file.tags && Object.keys(file.tags).length) ? Object.entries(file.tags).map(([k, v]) => ({ key: String(k), value: String(v ?? '') })) : []; const existingKeys = new Set(existing.map(r => r.key)); const suggested = DEFAULT_TAG_KEYS.filter(k => !existingKeys.has(k)).map(k => ({ key: k, value: '' })); const rows = (existing.length + suggested.length) ? [...existing, ...suggested] : [{ key: '', value: '' }]; setTagsRows(rows); setTagsError(''); }}>
+                  <FaTag /> Edit tags
+                </div>
+              )}
+              {userRole !== 'viewer' && (
+                <>
+                  <div className="menu-item" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { const f = moreMenu.target; setMoreMenu({ open: false, kind: null, target: null, x:0, y:0 }); setEditingFileId(f.id); setEditingName(f.name); }}>
+                    <FaEdit /> Rename
+                  </div>
+                  <div className="menu-item" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { const f = moreMenu.target; setMoreMenu({ open: false, kind: null, target: null, x:0, y:0 }); setMoveCopyModal({ open: true, mode: 'copy', itemType: 'file', target: f, dest: normalizeFolderPath(currentPath || ROOT_PATH) }); }}>
+                    <FaCopy /> Copy
+                  </div>
+                  <div className="menu-item" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { const f = moreMenu.target; setMoreMenu({ open: false, kind: null, target: null, x:0, y:0 }); setMoveCopyModal({ open: true, mode: 'move', itemType: 'file', target: f, dest: normalizeFolderPath(currentPath || ROOT_PATH) }); }}>
+                    <FaCut /> Move
+                  </div>
+                  {userRole === 'admin' && (
+                    <div className="menu-item danger" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={async () => { const f = moreMenu.target; setMoreMenu({ open: false, kind: null, target: null, x:0, y:0 }); await confirmAndDeleteFile(f); }}>
+                      <FaTrash /> Delete
+                    </div>
+                  )}
+                </>
+              )}
+              <div className="menu-item" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onClick={() => { const f = moreMenu.target; setMoreMenu({ open: false, kind: null, target: null, x:0, y:0 }); showFileDetails(f); }}>
+                <FaInfoCircle /> Details
+              </div>
+            </>
+          )}
+          {moreMenu.kind === 'folder' && typeof moreMenu.target === 'string' && (
+            <>
+              <div className="menu-item" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { const p = moreMenu.target; setMoreMenu({ open: false, kind: null, target: null, x:0, y:0 }); setMoveCopyModal({ open: true, mode: 'copy', itemType: 'folder', target: p, dest: normalizeFolderPath(currentPath || ROOT_PATH) }); }}>
+                <FaCopy /> Copy
+              </div>
+              <div className="menu-item" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { const p = moreMenu.target; setMoreMenu({ open: false, kind: null, target: null, x:0, y:0 }); setMoveCopyModal({ open: true, mode: 'move', itemType: 'folder', target: p, dest: normalizeFolderPath(currentPath || ROOT_PATH) }); }}>
+                <FaCut /> Move
+              </div>
+              <div className="menu-item" style={{ padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { const p = moreMenu.target; setMoreMenu({ open: false, kind: null, target: null, x:0, y:0 }); setReviewModal({ open: true, type: 'folder', target: p }); }}>
+                📨 Send for review
+              </div>
+              <div className="menu-item" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={() => { const p = moreMenu.target; setMoreMenu({ open: false, kind: null, target: null, x:0, y:0 }); showFolderDetails(p); }}>
+                <FaInfoCircle /> Details
+              </div>
+              {userRole === 'admin' && (
+                <div className="menu-item danger" style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onMouseDown={async () => { const p = moreMenu.target; setMoreMenu({ open: false, kind: null, target: null, x:0, y:0 }); await confirmAndDeleteFolder(p); }}>
+                  <FaTrash /> Delete
+                </div>
+              )}
             </>
           )}
         </div>
