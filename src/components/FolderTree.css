@@ -1,3 +1,8 @@
+.file-grid-view { position: relative; }
+.file-grid-item { position: relative; z-index: 0; }
+.file-grid-item .file-actions { position: relative; z-index: 500; }
+/* Force the inline menu above any row hover layer */
+.file-grid-item .inline-menu { z-index: 12000 !important; pointer-events: auto; }
 /* Improved Progress Bar Modal for Rename Operation */
 .folder-progress-modal-overlay {
   position: fixed;
@@ -1380,3 +1385,34 @@
   background: #0f172a; /* slate-900 */
   border-color: var(--primary-color);
 }
+
+/* === Hover Neutralization Overrides (requested: remove mouse hover action visuals) === */
+.file-grid-item .file-actions { opacity: 1 !important; }
+.file-grid-item:hover .file-actions { opacity: 1 !important; }
+.folder-card:hover,
+.file-grid-item:hover { background: inherit !important; box-shadow: inherit !important; border-color: inherit !important; transform: none !important; }
+.file-grid-item:hover .file-icon { transform: none !important; }
+.file-grid-item:hover .file-name { color: inherit !important; }
+[data-theme="dark"] .file-grid-item:hover { background: var(--bg-primary) !important; }
+/* Keep pointer cursor but no visual change */
+.folder-card:hover, .file-grid-item:hover { cursor: pointer; }
+
+/* --- REVISED FIX: Keep action (…/buttons) area always on top & clickable --- */
+.file-grid-item { display: flex; }
+.file-grid-item .item-content { flex: 1 1 auto; min-width: 0; position: relative; z-index: 1; }
+.file-grid-item .file-actions { flex: 0 0 auto; position: relative; z-index: 10; display: flex; pointer-events: auto; }
+/* Never let filename stretch below actions */
+.file-grid-item .file-name { max-width: 100%; }
+@media (min-width: 600px) { .file-grid-item .file-name { max-width: clamp(140px, 55%, 560px); } }
+/* Remove any overlapping decorative fade (previous version) */
+.file-grid-item .item-content::after { display: none !important; }
+/* Inline menu above everything */
+.file-grid-item .inline-menu { z-index: 20; }
+
+/* Always keep file action buttons visible & clickable; reserve space so filename never overlaps */
+.file-grid-item .file-actions { opacity: 1 !important; pointer-events: auto; gap: 6px; padding-left: 4px; background: transparent; }
+.file-grid-item { gap: 8px; }
+/* Make sure action buttons sit above any row hover or selection background */
+.file-grid-item .file-actions button, .file-grid-item .file-actions .icon-btn { position: relative; z-index: 30; }
+/* Prevent long filenames from flowing beneath actions */
+.file-grid-item .item-content { padding-right: 4px; }
