@@ -2,7 +2,8 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     function hasUser(uid) { return exists(/databases/$(database)/documents/users/$(uid)); }
-    function userRole(uid) { return hasUser(uid) ? get(/databases/$(database)/documents/users/$(uid)).data.role : null; }
+  function userRole(uid) { return hasUser(uid) ? get(/databases/$(database)/documents/users/$(uid)).data.role : null; }
+  function isPlatform(uid) { return hasUser(uid) && (get(/databases/$(database)/documents/users/$(uid)).data.isPlatformAdmin == true || userRole(uid) == 'platform'); }
     function isAdmin(uid) { return userRole(uid) == 'admin'; }
     function isEditor(uid) { return userRole(uid) == 'editor'; }
     function userTenant(uid) {
@@ -15,22 +16,36 @@ service cloud.firestore {
 
     // Users collection
     match /users/{userId} {
-      // Read own doc, any doc if admin, or any admin doc (for reviewer directory)
       allow read: if request.auth != null && (
-        request.auth.uid == userId ||
-        isAdmin(request.auth.uid) ||
-        resource.data.role == 'admin'
+        request.auth.uid == userId || // self
+        isPlatform(request.auth.uid) || // platform can read all
+        (isAdmin(request.auth.uid) && resource.data.tenantId == userTenant(request.auth.uid)) // tenant admin same tenant
       );
+      // Create: self-initialization OR platform admin creating any OR tenant admin creating within own tenant
+      allow create: if request.auth != null && (
+        (request.auth.uid == userId && request.resource.data.tenantId == userTenant(request.auth.uid)) ||
+        (isPlatform(request.auth.uid)) ||
+        (isAdmin(request.auth.uid) && request.resource.data.tenantId == userTenant(request.auth.uid))
+      );
+      // Update: user editing limited fields OR tenant admin same tenant OR platform admin
+      allow update: if request.auth != null && (
+        (request.auth.uid == userId && request.resource.data.tenantId == resource.data.tenantId) ||
+        (isAdmin(request.auth.uid) && resource.data.tenantId == userTenant(request.auth.uid)) ||
+        isPlatform(request.auth.uid)
+      );
+      allow delete: if request.auth != null && (
+        isPlatform(request.auth.uid) || (isAdmin(request.auth.uid) && resource.data.tenantId == userTenant(request.auth.uid))
+      );
+    }
 
-      // Create own doc only as non-admin role (viewer/user); admins may create any
-      allow create: if request.auth != null && request.auth.uid == userId &&
-        request.resource.data.role in ['user', 'viewer'];
-      allow create: if request.auth != null && isAdmin(request.auth.uid);
-
-      // Update own doc but cannot change role; admins may update any
-      allow update: if request.auth != null && request.auth.uid == userId &&
-        request.resource.data.role == resource.data.role;
-      allow update, delete: if request.auth != null && isAdmin(request.auth.uid);
+    // Tenants collection (companies)
+    match /tenants/{tenantId} {
+      allow read: if request.auth != null && (
+        isPlatform(request.auth.uid) || tenantId == userTenant(request.auth.uid)
+      );
+      allow list: if request.auth != null && isPlatform(request.auth.uid);
+      allow create: if request.auth != null && isPlatform(request.auth.uid);
+      allow update, delete: if request.auth != null && isPlatform(request.auth.uid);
     }
     
     // Files collection - role-based access

@@ -16,12 +16,13 @@ import {
 import { deleteObject, ref, listAll, getMetadata, uploadBytes } from 'firebase/storage';
 import { sendPasswordResetEmail, createUserWithEmailAndPassword } from 'firebase/auth';
 import { db, storage, auth, secondaryAuth } from '../firebase';
-import { FaArrowLeft, FaCheck, FaTimes, FaUsers, FaFileAlt, FaClock, FaKey, FaEnvelope, FaUserPlus } from 'react-icons/fa';
+import { FaArrowLeft, FaCheck, FaTimes, FaUsers, FaFileAlt, FaClock, FaKey, FaEnvelope, FaUserPlus, FaBuilding } from 'react-icons/fa';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import AdminSetPasswordModal from './AdminSetPasswordModal';
 import AdminEditUserModal from './AdminEditUserModal';
 import './AdminPanel.css';
 import { useTenant } from '../tenantContext';
+import { MULTI_TENANCY_ENABLED } from '../featureFlags';
 
 const AdminPanel = ({ user }) => {
   const [requests, setRequests] = useState([]);
@@ -47,7 +48,13 @@ const AdminPanel = ({ user }) => {
   const [editUserTarget, setEditUserTarget] = useState(null);
   const [showEditUser, setShowEditUser] = useState(false);
   const [deletingUid, setDeletingUid] = useState('');
-  const { tenantId } = useTenant();
+  const { tenantId } = MULTI_TENANCY_ENABLED ? useTenant() : { tenantId: 'default' };
+  // Tenancy management
+  const [tenants, setTenants] = useState([]);
+  const [newTenantName, setNewTenantName] = useState('');
+  const [tenantLoading, setTenantLoading] = useState(false);
+  const [tenantError, setTenantError] = useState('');
+  const [isPlatformAdmin, setIsPlatformAdmin] = useState(false);
 
   // Optimize existing images
   const [optPrefix, setOptPrefix] = useState('files/');
@@ -86,20 +93,45 @@ const AdminPanel = ({ user }) => {
   };
 
   useEffect(() => {
-  const unsubReq = onSnapshot(query(collection(db, 'requests'), orderBy('requestedAt', 'desc')), (snap) => {
-      const arr = []; snap.forEach(d => arr.push({ id: d.id, ...d.data() })); setRequests(arr);
+    if (!MULTI_TENANCY_ENABLED) {
+      // Fallback original listeners (no tenant scoping)
+      const unsubReq = onSnapshot(query(collection(db, 'requests'), orderBy('requestedAt','desc')), snap => { const arr=[]; snap.forEach(d=>arr.push({id:d.id,...d.data()})); setRequests(arr);});
+      const unsubReviews = onSnapshot(query(collection(db, 'reviews'), orderBy('requestedAt','desc')), snap => { const arr=[]; snap.forEach(d=>arr.push({id:d.id,...d.data()})); setReviews(arr);});
+      const unsubUsers = onSnapshot(query(collection(db, 'users')), snap => { const arr=[]; snap.forEach(d=>arr.push({id:d.id,...d.data()})); setUsers(arr);});
+      const unsubFiles = onSnapshot(query(collection(db, 'files'), orderBy('uploadedAt','desc')), snap => { const arr=[]; snap.forEach(d=>arr.push({id:d.id,...d.data()})); setFiles(arr); setLoading(false);});
+      return () => { unsubReq(); unsubReviews(); unsubUsers(); unsubFiles(); };
+    }
+    if (!user) return;
+    // Track current user for platform admin flag
+    const unsubSelf = onSnapshot(doc(db, 'users', user.uid), (d) => {
+      const data = d.data() || {}; setIsPlatformAdmin(!!data.isPlatformAdmin || data.role === 'platform');
     });
-  const unsubReviews = onSnapshot(query(collection(db, 'reviews'), orderBy('requestedAt', 'desc')), (snap) => {
-      const arr = []; snap.forEach(d => arr.push({ id: d.id, ...d.data() })); setReviews(arr);
+    // Requests
+    const unsubReq = onSnapshot(
+      tenantId ? query(collection(db, 'requests'), orderBy('tenantId'), startAt(tenantId), endAt(tenantId + '\uf8ff')) : query(collection(db, 'requests'), orderBy('requestedAt','desc')),
+      (snap) => { const arr=[]; snap.forEach(d=>{ const data=d.data(); if(!tenantId || data.tenantId===tenantId) arr.push({id:d.id,...data}); }); setRequests(arr); }
+    );
+    // Reviews
+    const unsubReviews = onSnapshot(
+      tenantId ? query(collection(db, 'reviews'), orderBy('tenantId'), startAt(tenantId), endAt(tenantId + '\uf8ff')) : query(collection(db, 'reviews'), orderBy('requestedAt','desc')),
+      (snap) => { const arr=[]; snap.forEach(d=>{ const data=d.data(); if(!tenantId || data.tenantId===tenantId) arr.push({id:d.id,...data}); }); setReviews(arr); }
+    );
+    // Users
+    const unsubUsers = onSnapshot(query(collection(db, 'users')), (snap) => {
+      const arr=[]; snap.forEach(d=>{ const data=d.data(); if(isPlatformAdmin || !tenantId || data.tenantId===tenantId) arr.push({id:d.id,...data}); }); setUsers(arr);
     });
-  const unsubUsers = onSnapshot(query(collection(db, 'users')), (snap) => {
-      const arr = []; snap.forEach(d => arr.push({ id: d.id, ...d.data() })); setUsers(arr);
-    });
-  const unsubFiles = onSnapshot(query(collection(db, 'files'), orderBy('uploadedAt', 'desc')), (snap) => {
-      const arr = []; snap.forEach(d => arr.push({ id: d.id, ...d.data() })); setFiles(arr); setLoading(false);
-    });
-    return () => { unsubReq(); unsubReviews(); unsubUsers(); unsubFiles(); };
-  }, []);
+    // Files
+    const unsubFiles = onSnapshot(
+      tenantId ? query(collection(db, 'files'), orderBy('tenantId'), startAt(tenantId), endAt(tenantId + '\uf8ff')) : query(collection(db, 'files'), orderBy('uploadedAt','desc')),
+      (snap) => { const arr=[]; snap.forEach(d=>{ const data=d.data(); if(!tenantId || data.tenantId===tenantId) arr.push({id:d.id,...data}); }); setFiles(arr); setLoading(false); }
+    );
+    // Tenants (platform only)
+    let unsubTenants = () => {};
+    if (isPlatformAdmin) {
+      unsubTenants = onSnapshot(query(collection(db, 'tenants'), orderBy('createdAt','desc')),(snap)=>{ const arr=[]; snap.forEach(d=>arr.push({id:d.id, ...d.data()})); setTenants(arr); });
+    }
+    return () => { unsubReq(); unsubReviews(); unsubUsers(); unsubFiles(); unsubTenants(); unsubSelf(); };
+  }, [tenantId, user, isPlatformAdmin]);
 
   const handleRequestAction = async (requestId, action, adminResponse = '') => {
     try {
@@ -297,7 +329,7 @@ const AdminPanel = ({ user }) => {
 
   const renderUsers = () => (
     <div className="admin-section">
-      <h3>User Management ({users.length} users)</h3>
+  <h3>User Management ({users.length} users){MULTI_TENANCY_ENABLED && tenantId && !isPlatformAdmin && <span style={{marginLeft:8,fontSize:12,color:'#555'}}>Tenant: {tenantId}</span>}{MULTI_TENANCY_ENABLED && isPlatformAdmin && <span style={{marginLeft:8,fontSize:12,color:'#555'}}>Platform Admin</span>}</h3>
       <div className="users-table">
         <table>
           <thead>
@@ -314,6 +346,7 @@ const AdminPanel = ({ user }) => {
                     <option value="user">User</option>
                     <option value="editor">Editor</option>
                     <option value="admin">Admin</option>
+                    {MULTI_TENANCY_ENABLED && isPlatformAdmin && <option value="platform">Platform</option>}
                   </select>
                 </td>
                 <td>{formatDate(u.createdAt)}</td>
@@ -657,7 +690,8 @@ const AdminPanel = ({ user }) => {
             <div className="form-group"><label htmlFor="userEmail">Email Address *</label><input type="email" id="userEmail" value={newUserData.email} onChange={(e) => setNewUserData({ ...newUserData, email: e.target.value })} placeholder="user@example.com" required disabled={addUserLoading} /></div>
             <div className="form-group"><label htmlFor="userName">Username *</label><input type="text" id="userName" value={newUserData.username} onChange={(e) => setNewUserData({ ...newUserData, username: e.target.value })} placeholder="Enter username" required disabled={addUserLoading} /></div>
             <div className="form-group"><label htmlFor="userPassword">Password *</label><input type="password" id="userPassword" value={newUserData.password} onChange={(e) => setNewUserData({ ...newUserData, password: e.target.value })} placeholder="Minimum 6 characters" minLength={6} required disabled={addUserLoading} /><small className="password-hint">Password must be at least 6 characters long</small></div>
-            <div className="form-group"><label htmlFor="userRole">Role *</label><select id="userRole" value={newUserData.role} onChange={(e) => setNewUserData({ ...newUserData, role: e.target.value })} required disabled={addUserLoading}><option value="viewer">Viewer - Read-only access</option><option value="user">User - Upload files, submit requests</option><option value="editor">Editor - Edit tags, upload files</option><option value="admin">Admin - Full access</option></select></div>
+            <div className="form-group"><label htmlFor="userRole">Role *</label><select id="userRole" value={newUserData.role} onChange={(e) => setNewUserData({ ...newUserData, role: e.target.value })} required disabled={addUserLoading}><option value="viewer">Viewer - Read-only access</option><option value="user">User - Upload files, submit requests</option><option value="editor">Editor - Edit tags, upload files</option><option value="admin">Admin - Full access</option>{MULTI_TENANCY_ENABLED && isPlatformAdmin && <option value="platform">Platform Admin</option>}</select></div>
+            {MULTI_TENANCY_ENABLED && isPlatformAdmin && (<div className="form-group"><label>Tenant ID *</label><input type="text" value={tenantId || ''} disabled placeholder="Auto tenant or override" /></div>)}
             <div className="form-actions"><button type="button" className="cancel-btn" onClick={resetAddUserForm} disabled={addUserLoading}>Cancel</button><button type="submit" className="create-user-btn" disabled={addUserLoading}>{addUserLoading ? 'Creating...' : 'Create User'}</button></div>
           </form>
         </div>
@@ -703,6 +737,7 @@ const AdminPanel = ({ user }) => {
         <button className={`tab-btn ${activeTab === 'addUsers' ? 'active' : ''}`} onClick={() => setActiveTab('addUsers')}><FaUserPlus /> Add Users</button>
         <button className={`tab-btn ${activeTab === 'files' ? 'active' : ''}`} onClick={() => setActiveTab('files')}><FaFileAlt /> Files ({files.length})</button>
         <button className={`tab-btn ${activeTab === 'optimize' ? 'active' : ''}`} onClick={() => setActiveTab('optimize')}><FaFileAlt /> Optimize</button>
+  {MULTI_TENANCY_ENABLED && isPlatformAdmin && <button className={`tab-btn ${activeTab === 'tenants' ? 'active' : ''}`} onClick={() => setActiveTab('tenants')}><FaBuilding /> Tenants ({tenants.length})</button>}
       </div>
 
       <div className="admin-content">
@@ -712,6 +747,34 @@ const AdminPanel = ({ user }) => {
         {activeTab === 'addUsers' && renderAddUsers()}
         {activeTab === 'files' && renderFiles()}
         {activeTab === 'optimize' && renderOptimize()}
+  {MULTI_TENANCY_ENABLED && activeTab === 'tenants' && isPlatformAdmin && (
+          <div className="admin-section">
+            <h3>Tenants ({tenants.length})</h3>
+            <form onSubmit={async (e)=>{e.preventDefault(); if(!newTenantName.trim()) return; setTenantLoading(true); setTenantError(''); try { await setDoc(doc(collection(db,'tenants')), { name: newTenantName.trim(), createdAt: new Date(), active: true }); setNewTenantName(''); } catch(err){ setTenantError(err?.message||'Failed to create tenant'); } finally { setTenantLoading(false);} }} style={{marginBottom:16, display:'flex', gap:8, alignItems:'center'}}>
+              <input value={newTenantName} onChange={e=>setNewTenantName(e.target.value)} placeholder="New tenant name" disabled={tenantLoading} />
+              <button type="submit" className="approve-btn" disabled={tenantLoading || !newTenantName.trim()}>{tenantLoading? 'Creating…':'Create Tenant'}</button>
+              {tenantError && <span style={{color:'crimson', fontSize:12}}>{tenantError}</span>}
+            </form>
+            <div className="files-table">
+              <table>
+                <thead><tr><th>Name</th><th>ID</th><th>Active</th><th>Created</th><th>Actions</th></tr></thead>
+                <tbody>
+                  {tenants.map(t => (
+                    <tr key={t.id}>
+                      <td>{t.name||'-'}</td>
+                      <td>{t.id}</td>
+                      <td>{String(t.active!==false)}</td>
+                      <td>{formatDate(t.createdAt)}</td>
+                      <td>
+                        <button className="reset-password-btn" onClick={async ()=>{ try { await updateDoc(doc(db,'tenants', t.id), { active: !(t.active!==false), updatedAt: new Date() }); } catch(e){ alert('Failed to toggle'); } }}>{(t.active!==false)?'Deactivate':'Activate'}</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </div>
 
       {showResetConfirm && (
