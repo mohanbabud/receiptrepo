@@ -8,6 +8,7 @@ import { httpsCallable } from 'firebase/functions';
 import { functions } from '../firebase';
 import { storage, db, auth } from '../firebase';
 import { collection, doc, onSnapshot, setDoc, deleteDoc, addDoc, serverTimestamp, getDocs, query as fsQuery, where, arrayUnion } from 'firebase/firestore';
+import { useTenant } from '../tenantContext';
 import { onAuthStateChanged } from 'firebase/auth';
 import StorageTreeView from './StorageTreeView';
 import { FaTrash, FaEdit, FaCopy, FaCut, FaStar, FaRegStar, FaDownload, FaEye, FaArrowUp, FaEllipsisH, FaInfoCircle, FaTag, FaCheckCircle } from 'react-icons/fa';
@@ -18,6 +19,7 @@ const ROOT_PATH = '/files/';
 const DEFAULT_TAG_KEYS = ['ProjectName', 'Value', 'Reciepent', 'Date', 'ExpenseName'];
 
 const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFileSelect, filesOnly = false }) => {
+  const { tenantId } = useTenant();
   // State
   // Removed Firestore-backed files/folders; relying on Storage data only
   const [, setExpandedFolders] = useState(new Set([ROOT_PATH]));
@@ -104,14 +106,15 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   // Load admins for review assignment
   useEffect(() => {
     try {
-      const q = fsQuery(collection(db, 'users'), where('role', '==', 'admin'));
+      const baseQ = fsQuery(collection(db, 'users'), where('role', '==', 'admin'));
+      const q = tenantId ? fsQuery(collection(db, 'users'), where('role', '==', 'admin'), where('tenantId', '==', tenantId)) : baseQ;
       const unsub = onSnapshot(q, (snap) => {
         const arr = []; snap.forEach(d => { const u = d.data() || {}; arr.push({ id: d.id, email: u.email || '', username: u.username || '' }); });
         setReviewAdmins(arr);
       });
       return () => { unsub && unsub(); };
     } catch (_) { /* ignore */ }
-  }, []);
+  }, [tenantId]);
   // Global compact "More" menu (file/folder) now uses viewport-fixed positioning to avoid z-index clipping
   const [moreMenu, setMoreMenu] = useState({ open: false, kind: null, target: null, x: 0, y: 0 }); // kind: 'file' | 'folder'
 
@@ -673,7 +676,15 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
           const batches = [];
           for (let i = 0; i < paths.length; i += 10) {
             const chunk = paths.slice(i, i + 10);
-            batches.push(fsQuery(collection(db, 'files'), where('fullPath', 'in', chunk)));
+            try {
+              if (tenantId) {
+                batches.push(fsQuery(collection(db, 'files'), where('tenantId', '==', tenantId), where('fullPath', 'in', chunk)));
+              } else {
+                batches.push(fsQuery(collection(db, 'files'), where('fullPath', 'in', chunk)));
+              }
+            } catch {
+              batches.push(fsQuery(collection(db, 'files'), where('fullPath', 'in', chunk)));
+            }
           }
           const snaps = await Promise.all(batches.map(q => getDocs(q)));
           for (const snap of snaps) {
@@ -919,6 +930,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
         requestedEmail: user.email,
         requestedAt: serverTimestamp(),
         status: 'pending',
+        tenantId,
       };
       await addDoc(collection(db, 'requests'), req);
   setIsError(false);
@@ -2209,7 +2221,16 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
               // Find doc(s) in Firestore by fullPath
               const fullPath = tgt?.ref?.fullPath;
               if (fullPath) {
-                const snaps = await getDocs(fsQuery(collection(db, 'files'), where('fullPath', '==', fullPath)));
+                let snaps;
+                try {
+                  if (tenantId) {
+                    snaps = await getDocs(fsQuery(collection(db, 'files'), where('tenantId', '==', tenantId), where('fullPath', '==', fullPath)));
+                  } else {
+                    snaps = await getDocs(fsQuery(collection(db, 'files'), where('fullPath', '==', fullPath)));
+                  }
+                } catch {
+                  snaps = await getDocs(fsQuery(collection(db, 'files'), where('fullPath', '==', fullPath)));
+                }
                 if (!snaps.empty) {
                   const batch = (await import('firebase/firestore')).writeBatch(db);
                   snaps.forEach(d => batch.update(d.ref, { tags: map, updatedAt: new Date() }));
@@ -2232,7 +2253,8 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                       uploadedAt: new Date(),
                       uploadedBy: 'system',
                       uploadedByUid: auth?.currentUser?.uid || null,
-                      tags: map
+                      tags: map,
+                      tenantId
                     });
                   } catch (e) {
                     console.warn('Failed to create file doc for tags', e);
@@ -3108,6 +3130,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                     requestedByEmail: cur?.email || null,
                     status: 'pending',
                     requestedAt: serverTimestamp(),
+                    tenantId,
                   });
                   setReviewModal({ open: false, type: null, target: null });
                   setReviewAssignee('');
@@ -3163,6 +3186,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                     requestedByEmail: cur?.email || null,
                     status: 'pending',
                     requestedAt: serverTimestamp(),
+                    tenantId,
                   }));
                   await Promise.allSettled(tasks);
                   setBulkReviewModal({ open: false, fileIds: [] });

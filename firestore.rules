@@ -1,15 +1,17 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    function isAdmin(uid) {
-      return exists(/databases/$(database)/documents/users/$(uid)) &&
-             get(/databases/$(database)/documents/users/$(uid)).data.role == 'admin';
+    function hasUser(uid) { return exists(/databases/$(database)/documents/users/$(uid)); }
+    function userRole(uid) { return hasUser(uid) ? get(/databases/$(database)/documents/users/$(uid)).data.role : null; }
+    function isAdmin(uid) { return userRole(uid) == 'admin'; }
+    function isEditor(uid) { return userRole(uid) == 'editor'; }
+    function userTenant(uid) {
+      return hasUser(uid) && get(/databases/$(database)/documents/users/$(uid)).data.tenantId != null
+        ? get(/databases/$(database)/documents/users/$(uid)).data.tenantId
+        : 'default';
     }
-
-    function isEditor(uid) {
-      return exists(/databases/$(database)/documents/users/$(uid)) &&
-             get(/databases/$(database)/documents/users/$(uid)).data.role == 'editor';
-    }
+    function sameTenant(resTenant, uid) { return !(resource.data.keys().hasAny(['tenantId'])) || resTenant == userTenant(uid); }
+    function sameTenantReq(reqTenant, uid) { return !(request.resource.data.keys().hasAny(['tenantId'])) || reqTenant == userTenant(uid); }
 
     // Users collection
     match /users/{userId} {
@@ -33,59 +35,36 @@ service cloud.firestore {
     
     // Files collection - role-based access
     match /files/{fileId} {
-      allow read: if request.auth != null;
-      // Allow users, editors, and admins to create file metadata
-      allow create: if request.auth != null &&
-        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['user', 'editor', 'admin'];
-      // Allow admins to update/delete any file
-      allow update, delete: if request.auth != null && isAdmin(request.auth.uid);
-      // Allow owners to update tags (and updatedAt stamp) only
-      allow update: if request.auth != null &&
-        resource.data.uploadedByUid == request.auth.uid &&
-        request.resource.data.diff(resource.data).changedKeys().hasOnly(['tags', 'updatedAt']);
-      // Allow editors to update tags (and updatedAt) without ownership
-      allow update: if request.auth != null &&
-        isEditor(request.auth.uid) &&
-        request.resource.data.diff(resource.data).changedKeys().hasOnly(['tags', 'updatedAt']);
+      allow read: if request.auth != null && sameTenant(resource.data.tenantId, request.auth.uid);
+      allow create: if request.auth != null && userRole(request.auth.uid) in ['user','editor','admin'] && sameTenantReq(request.resource.data.tenantId, request.auth.uid);
+      allow update, delete: if request.auth != null && isAdmin(request.auth.uid) && sameTenant(resource.data.tenantId, request.auth.uid);
+      allow update: if request.auth != null && resource.data.uploadedByUid == request.auth.uid && sameTenant(resource.data.tenantId, request.auth.uid) && request.resource.data.diff(resource.data).changedKeys().hasOnly(['tags','updatedAt']);
+      allow update: if request.auth != null && isEditor(request.auth.uid) && sameTenant(resource.data.tenantId, request.auth.uid) && request.resource.data.diff(resource.data).changedKeys().hasOnly(['tags','updatedAt']);
     }
     
     // Requests collection - users can create and read their own, admins can read/update all
     match /requests/{requestId} {
-      // On create, use request.resource.data (resource does not exist yet)
-      allow create: if request.auth != null && 
-        request.auth.uid == request.resource.data.requestedBy;
-      allow read: if request.auth != null && 
-        (request.auth.uid == resource.data.requestedBy ||
-         isAdmin(request.auth.uid));
-      allow update: if request.auth != null && 
-        isAdmin(request.auth.uid);
+      allow create: if request.auth != null && request.auth.uid == request.resource.data.requestedBy && sameTenantReq(request.resource.data.tenantId, request.auth.uid);
+      allow read: if request.auth != null && sameTenant(resource.data.tenantId, request.auth.uid) && (request.auth.uid == resource.data.requestedBy || isAdmin(request.auth.uid));
+      allow update: if request.auth != null && isAdmin(request.auth.uid) && sameTenant(resource.data.tenantId, request.auth.uid);
     }
 
     // Reviews collection
     match /reviews/{reviewId} {
-      // Users can create their own review requests
-      allow create: if request.auth != null && request.auth.uid == request.resource.data.requestedBy;
-      // Requester can read their own; admins can read all
-      allow read: if request.auth != null && (request.auth.uid == resource.data.requestedBy || isAdmin(request.auth.uid));
-      // Only admins can update (e.g., mark reviewed / rejected)
-      allow update: if request.auth != null && isAdmin(request.auth.uid);
-      // No deletes from clients
+      allow create: if request.auth != null && request.auth.uid == request.resource.data.requestedBy && sameTenantReq(request.resource.data.tenantId, request.auth.uid);
+      allow read: if request.auth != null && sameTenant(resource.data.tenantId, request.auth.uid) && (request.auth.uid == resource.data.requestedBy || isAdmin(request.auth.uid));
+      allow update: if request.auth != null && isAdmin(request.auth.uid) && sameTenant(resource.data.tenantId, request.auth.uid);
     }
 
     // Global folder metadata (labels: tags + color)
     match /folders_meta/{docId} {
-      // Any signed-in user can read labels
-      allow read: if request.auth != null;
-      // Only admins can write labels
-      allow create, update, delete: if request.auth != null && isAdmin(request.auth.uid);
+      allow read: if request.auth != null && ( !(resource.data.keys().hasAny(['tenantId'])) || resource.data.tenantId == userTenant(request.auth.uid) );
+      allow create, update, delete: if request.auth != null && isAdmin(request.auth.uid) && sameTenantReq(request.resource.data.tenantId, request.auth.uid);
     }
 
     // Tags Catalog (keys and suggestion values)
     match /tags_catalog/{keyId} {
-      // Let any signed-in user read available tag keys/values
       allow read: if request.auth != null;
-      // Only admins can modify the catalog entries
       allow create, update, delete: if request.auth != null && isAdmin(request.auth.uid);
     }
     

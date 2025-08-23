@@ -21,6 +21,7 @@ import { getFunctions, httpsCallable } from 'firebase/functions';
 import AdminSetPasswordModal from './AdminSetPasswordModal';
 import AdminEditUserModal from './AdminEditUserModal';
 import './AdminPanel.css';
+import { useTenant } from '../tenantContext';
 
 const AdminPanel = ({ user }) => {
   const [requests, setRequests] = useState([]);
@@ -46,6 +47,7 @@ const AdminPanel = ({ user }) => {
   const [editUserTarget, setEditUserTarget] = useState(null);
   const [showEditUser, setShowEditUser] = useState(false);
   const [deletingUid, setDeletingUid] = useState('');
+  const { tenantId } = useTenant();
 
   // Optimize existing images
   const [optPrefix, setOptPrefix] = useState('files/');
@@ -84,16 +86,16 @@ const AdminPanel = ({ user }) => {
   };
 
   useEffect(() => {
-    const unsubReq = onSnapshot(query(collection(db, 'requests'), orderBy('requestedAt', 'desc')), (snap) => {
+  const unsubReq = onSnapshot(query(collection(db, 'requests'), orderBy('requestedAt', 'desc')), (snap) => {
       const arr = []; snap.forEach(d => arr.push({ id: d.id, ...d.data() })); setRequests(arr);
     });
-    const unsubReviews = onSnapshot(query(collection(db, 'reviews'), orderBy('requestedAt', 'desc')), (snap) => {
+  const unsubReviews = onSnapshot(query(collection(db, 'reviews'), orderBy('requestedAt', 'desc')), (snap) => {
       const arr = []; snap.forEach(d => arr.push({ id: d.id, ...d.data() })); setReviews(arr);
     });
-    const unsubUsers = onSnapshot(query(collection(db, 'users')), (snap) => {
+  const unsubUsers = onSnapshot(query(collection(db, 'users')), (snap) => {
       const arr = []; snap.forEach(d => arr.push({ id: d.id, ...d.data() })); setUsers(arr);
     });
-    const unsubFiles = onSnapshot(query(collection(db, 'files'), orderBy('uploadedAt', 'desc')), (snap) => {
+  const unsubFiles = onSnapshot(query(collection(db, 'files'), orderBy('uploadedAt', 'desc')), (snap) => {
       const arr = []; snap.forEach(d => arr.push({ id: d.id, ...d.data() })); setFiles(arr); setLoading(false);
     });
     return () => { unsubReq(); unsubReviews(); unsubUsers(); unsubFiles(); };
@@ -150,7 +152,7 @@ const AdminPanel = ({ user }) => {
     try {
   const authForCreate = secondaryAuth || auth;
   const cred = await createUserWithEmailAndPassword(authForCreate, newUserData.email, newUserData.password);
-      await setDoc(doc(db, 'users', cred.user.uid), { email: newUserData.email, username: newUserData.username, role: newUserData.role, createdAt: new Date(), createdBy: user.uid, createdByEmail: user.email, isActive: true });
+  await setDoc(doc(db, 'users', cred.user.uid), { email: newUserData.email, username: newUserData.username, role: newUserData.role, createdAt: new Date(), createdBy: user.uid, createdByEmail: user.email, isActive: true, tenantId });
       setAddUserSuccess(`User ${newUserData.username} (${newUserData.email}) has been created successfully!`);
       setNewUserData({ email: '', username: '', password: '', role: 'user' });
       setTimeout(() => { setAddUserSuccess(''); setShowAddUserForm(false); }, 5000);

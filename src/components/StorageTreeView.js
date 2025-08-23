@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { ref, listAll, uploadBytes, deleteObject, getBytes, uploadString } from 'firebase/storage';
 import { storage, db, auth } from '../firebase';
 import { addDoc, collection, serverTimestamp } from 'firebase/firestore';
+import { useTenant } from '../tenantContext';
 import { FaExpand, FaCompress } from 'react-icons/fa';
 import { MacFolderIcon, MacFileIcon } from './icons/MacIcons';
 import './StorageTreeView.css';
@@ -269,6 +270,8 @@ const StorageTreeView = ({ onFolderSelect, currentPath, refreshTrigger, userRole
   try { onStructureChanged && onStructureChanged(); } catch {}
   };
 
+  const { tenantId } = useTenant();
+
   const copyFolderRecursive = async (src, dst, removeOriginal = false) => {
     const fromRef = ref(storage, src);
     const res = await listAll(fromRef);
@@ -311,7 +314,8 @@ const StorageTreeView = ({ onFolderSelect, currentPath, refreshTrigger, userRole
               requestedBy: user.uid,
               requestedEmail: user.email || '',
               requestedAt: serverTimestamp(),
-              status: 'pending'
+              status: 'pending',
+              tenantId
             });
             try {
               window.dispatchEvent(new CustomEvent('file-action-success', { detail: { message: 'Delete request submitted for admin review.' } }));
