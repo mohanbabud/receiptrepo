@@ -558,6 +558,22 @@
   padding: 8px 4px 4px 4px;
 }
 
+/* Mobile adjustments */
+@media (max-width: 640px) {
+  .folder-tree.is-mobile .folder-card-grid {
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 8px;
+  }
+  .folder-tree.is-mobile .folder-card { padding: 10px; }
+  .folder-tree.is-mobile .file-grid-item { padding-top: 4px; padding-bottom: 4px; }
+  .folder-tree.is-mobile .icon-btn { width: 34px; height: 34px; }
+  .folder-tree.is-mobile .tree-header { padding: 8px 12px; }
+  .folder-tree.is-mobile .breadcrumb-link { padding: 4px 8px; }
+  .folder-tree.is-mobile .file-name { font-size: 14px; }
+  .folder-tree.is-mobile .inline-menu { position: fixed !important; left: 0 !important; right: 0 !important; bottom: 0 !important; top: auto !important; width: 100% !important; border-radius: 16px 16px 0 0; box-shadow: 0 -4px 20px rgba(0,0,0,0.2); padding: 8px 12px; display: flex; flex-direction: column; max-height: 60vh; overflow-y: auto; }
+  .folder-tree.is-mobile .inline-menu .menu-item { padding: 10px 14px; font-size: 15px; }
+}
+
 .folder-card {
   display: flex;
   flex-direction: column;

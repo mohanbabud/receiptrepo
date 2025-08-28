@@ -8,6 +8,7 @@ import { httpsCallable } from 'firebase/functions';
 import { functions } from '../firebase';
 import { storage, db, auth } from '../firebase';
 import { collection, doc, onSnapshot, setDoc, deleteDoc, addDoc, serverTimestamp, getDocs, query as fsQuery, where, arrayUnion } from 'firebase/firestore';
+import { useTenant } from '../tenantContext';
 import { onAuthStateChanged } from 'firebase/auth';
 import StorageTreeView from './StorageTreeView';
 import { FaTrash, FaEdit, FaCopy, FaCut, FaStar, FaRegStar, FaDownload, FaEye, FaArrowUp, FaEllipsisH, FaInfoCircle, FaTag, FaCheckCircle } from 'react-icons/fa';
@@ -18,6 +19,7 @@ const ROOT_PATH = '/files/';
 const DEFAULT_TAG_KEYS = ['ProjectName', 'Value', 'Reciepent', 'Date', 'ExpenseName'];
 
 const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFileSelect, filesOnly = false }) => {
+  const { tenantId } = useTenant();
   // State
   // Removed Firestore-backed files/folders; relying on Storage data only
   const [, setExpandedFolders] = useState(new Set([ROOT_PATH]));
@@ -60,6 +62,8 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   // Labels (tags + color) and Favorites state
   const [reviewedPaths, setReviewedPaths] = useState(new Set());
   const [reviewedFileIds, setReviewedFileIds] = useState(new Set());
+  const [reviewedMeta, setReviewedMeta] = useState(new Map()); // Map<fileId|fullPath, { reviewedBy, reviewedAt }>
+  const [adminDirectory, setAdminDirectory] = useState(new Map()); // Map<uid, {username,email}>
   const [pendingPaths, setPendingPaths] = useState(new Set());
   const [pendingFileIds, setPendingFileIds] = useState(new Set());
   const [tagPopoverFor, setTagPopoverFor] = useState(null); // file id
@@ -101,17 +105,46 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
   // Tag search moved to dedicated page; no local state here
   const [valueSuggestIdx, setValueSuggestIdx] = useState(null); // which row's value suggestions are open
   const [savingTags, setSavingTags] = useState(false);
+  // Mobile viewport detection for responsive tweaks
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    const update = () => { try { setIsMobile(window.innerWidth <= 640); } catch {} };
+    update();
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, []);
   // Load admins for review assignment
   useEffect(() => {
     try {
-      const q = fsQuery(collection(db, 'users'), where('role', '==', 'admin'));
-      const unsub = onSnapshot(q, (snap) => {
-        const arr = []; snap.forEach(d => { const u = d.data() || {}; arr.push({ id: d.id, email: u.email || '', username: u.username || '' }); });
+      // Fetch admins in this tenant plus global platform admins
+      const unsub = onSnapshot(collection(db, 'users'), (snap) => {
+        const arr = []; snap.forEach(d => {
+          const u = d.data() || {};
+          const role = String(u.role || '').trim().toLowerCase();
+          const isAdmin = role === 'admin' || role === 'platform';
+          if (!isAdmin) return;
+          // Treat missing tenantId as belonging to current tenant (legacy records)
+          const uTenant = u.tenantId || 'default';
+          const curTenant = tenantId || 'default';
+          if (!tenantId || uTenant === curTenant || role === 'platform' || !u.tenantId) {
+            arr.push({ id: d.id, email: u.email || '', username: u.username || '', role, tenantId: u.tenantId });
+          }
+          if (isAdmin) {
+            adminDirectory.set(d.id, { username: u.username || '', email: u.email || '' });
+          }
+        });
+        // Sort: platform first then admins alphabetically by email
+        arr.sort((a,b)=>{
+          if (a.role !== b.role) return a.role === 'platform' ? -1 : 1;
+          return (a.email || a.username || '').localeCompare(b.email || b.username || '');
+        });
         setReviewAdmins(arr);
+        // Force new Map instance to trigger re-render
+        setAdminDirectory(new Map(adminDirectory));
       });
       return () => { unsub && unsub(); };
     } catch (_) { /* ignore */ }
-  }, []);
+  }, [tenantId]);
   // Global compact "More" menu (file/folder) now uses viewport-fixed positioning to avoid z-index clipping
   const [moreMenu, setMoreMenu] = useState({ open: false, kind: null, target: null, x: 0, y: 0 }); // kind: 'file' | 'folder'
 
@@ -451,17 +484,21 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
     try {
       const q = fsQuery(collection(db, 'reviews'), where('status', '==', 'reviewed'));
       const unsub = onSnapshot(q, (snap) => {
-        const pathSet = new Set();
-        const idSet = new Set();
+    const pathSet = new Set();
+    const idSet = new Set();
+    const meta = new Map(); // key: path or fileId -> { reviewerUid, reviewerEmail, reviewedAt }
         snap.forEach((d) => {
           const r = d.data();
           if (r?.targetType === 'file') {
             if (r.fullPath) pathSet.add(r.fullPath);
             if (r.fileId) idSet.add(r.fileId);
+      const key = r.fileId || r.fullPath;
+      if (key) meta.set(key, { reviewerUid: r.reviewedBy || '', reviewerEmail: r.reviewedByEmail || '', reviewedAt: r.reviewedAt });
           }
         });
         setReviewedPaths(pathSet);
         setReviewedFileIds(idSet);
+    setReviewedMeta(meta);
       });
       return () => { try { unsub(); } catch {} };
     } catch {}
@@ -673,7 +710,15 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
           const batches = [];
           for (let i = 0; i < paths.length; i += 10) {
             const chunk = paths.slice(i, i + 10);
-            batches.push(fsQuery(collection(db, 'files'), where('fullPath', 'in', chunk)));
+            try {
+              if (tenantId) {
+                batches.push(fsQuery(collection(db, 'files'), where('tenantId', '==', tenantId), where('fullPath', 'in', chunk)));
+              } else {
+                batches.push(fsQuery(collection(db, 'files'), where('fullPath', 'in', chunk)));
+              }
+            } catch {
+              batches.push(fsQuery(collection(db, 'files'), where('fullPath', 'in', chunk)));
+            }
           }
           const snaps = await Promise.all(batches.map(q => getDocs(q)));
           for (const snap of snaps) {
@@ -919,6 +964,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
         requestedEmail: user.email,
         requestedAt: serverTimestamp(),
         status: 'pending',
+        tenantId,
       };
       await addDoc(collection(db, 'requests'), req);
   setIsError(false);
@@ -2062,10 +2108,21 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                       const isPending = pendingFileIds.has(file.id) || pendingPaths.has(pathKey);
                       const isReviewed = reviewedFileIds.has(file.id) || reviewedPaths.has(pathKey);
                       const color = isPending ? '#f59e0b' : (isReviewed ? '#16a34a' : null);
+                      let reviewTitle = '';
+                      if (isPending) reviewTitle = 'Pending review';
+                      if (isReviewed) {
+                        const key = file.id || pathKey;
+                        const meta = reviewedMeta.get(key) || reviewedMeta.get(pathKey);
+                        const when = meta?.reviewedAt?.toDate ? meta.reviewedAt.toDate() : (meta?.reviewedAt instanceof Date ? meta.reviewedAt : null);
+                        const reviewerInfo = meta?.reviewerUid ? adminDirectory.get(meta.reviewerUid) : null;
+                        const displayName = reviewerInfo?.username || reviewerInfo?.email || meta?.reviewerEmail || '';
+                        const whenStr = when ? when.toLocaleString() : '';
+                        reviewTitle = `Reviewed${displayName ? ' by ' + displayName : ''}${whenStr ? ' on ' + whenStr : ''}`.trim();
+                      }
                       return (
                         <span
                           className="review-status-slot"
-                          title={isPending ? 'Pending review' : isReviewed ? 'Reviewed' : ''}
+                          title={reviewTitle}
                           aria-hidden={!(isPending || isReviewed)}
                           style={{ marginLeft: 6, display: 'inline-flex', alignItems: 'center' }}
                         >
@@ -2209,7 +2266,16 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
               // Find doc(s) in Firestore by fullPath
               const fullPath = tgt?.ref?.fullPath;
               if (fullPath) {
-                const snaps = await getDocs(fsQuery(collection(db, 'files'), where('fullPath', '==', fullPath)));
+                let snaps;
+                try {
+                  if (tenantId) {
+                    snaps = await getDocs(fsQuery(collection(db, 'files'), where('tenantId', '==', tenantId), where('fullPath', '==', fullPath)));
+                  } else {
+                    snaps = await getDocs(fsQuery(collection(db, 'files'), where('fullPath', '==', fullPath)));
+                  }
+                } catch {
+                  snaps = await getDocs(fsQuery(collection(db, 'files'), where('fullPath', '==', fullPath)));
+                }
                 if (!snaps.empty) {
                   const batch = (await import('firebase/firestore')).writeBatch(db);
                   snaps.forEach(d => batch.update(d.ref, { tags: map, updatedAt: new Date() }));
@@ -2232,7 +2298,8 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                       uploadedAt: new Date(),
                       uploadedBy: 'system',
                       uploadedByUid: auth?.currentUser?.uid || null,
-                      tags: map
+                      tags: map,
+                      tenantId
                     });
                   } catch (e) {
                     console.warn('Failed to create file doc for tags', e);
@@ -2572,7 +2639,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
 
   return (
   <div
-      className={`folder-tree${compact ? ' compact' : ''}`}
+      className={`folder-tree${compact ? ' compact' : ''}${isMobile ? ' is-mobile' : ''}`}
       tabIndex={0}
       onKeyDown={handleKeyDown}
     > 
@@ -2596,7 +2663,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
               // Build breadcrumbs from currentPath
               const safe = normalizeFolderPath(currentPath);
               const parts = safe.replace(/^\/files\/?/, '').split('/').filter(Boolean);
-              const crumbs = [{ label: 'PNLM', path: ROOT_PATH }];
+              const crumbs = [{ label: 'PINNACLE', path: ROOT_PATH }];
               let acc = ROOT_PATH;
               parts.forEach(p => {
                 acc = acc + p + '/';
@@ -3070,8 +3137,11 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
             <div style={{ padding: 16, display: 'grid', gap: 12 }}>
               <div>
                 <div style={{ marginBottom: 6, color: '#666', fontSize: 13 }}>Assign to admin</div>
-                <select value={reviewAssignee} onChange={e => setReviewAssignee(e.target.value)} style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #ccc' }}>
-                  <option value="">Select…</option>
+                {reviewAdmins.length === 0 && (
+                  <div style={{fontSize:12,color:'#b33',marginBottom:4}}>No admins found. An admin or platform user must exist to assign a review.</div>
+                )}
+                <select value={reviewAssignee} onChange={e => setReviewAssignee(e.target.value)} disabled={reviewAdmins.length===0} style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #ccc', background: reviewAdmins.length===0 ? '#f5f5f5' : '#fff' }}>
+                  <option value="">{reviewAdmins.length===0 ? 'No admins available' : 'Select…'}</option>
                   {reviewAdmins.map(a => (<option key={a.id} value={a.id}>{a.username || a.email || a.id}</option>))}
                 </select>
               </div>
@@ -3108,6 +3178,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                     requestedByEmail: cur?.email || null,
                     status: 'pending',
                     requestedAt: serverTimestamp(),
+                    tenantId,
                   });
                   setReviewModal({ open: false, type: null, target: null });
                   setReviewAssignee('');
@@ -3136,8 +3207,11 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
             <div style={{ padding: 16, display: 'grid', gap: 12 }}>
               <div>
                 <div style={{ marginBottom: 6, color: '#666', fontSize: 13 }}>Assign to admin</div>
-                <select value={reviewAssignee} onChange={e => setReviewAssignee(e.target.value)} style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #ccc' }}>
-                  <option value="">Select…</option>
+                {reviewAdmins.length === 0 && (
+                  <div style={{fontSize:12,color:'#b33',marginBottom:4}}>No admins found for assignment.</div>
+                )}
+                <select value={reviewAssignee} onChange={e => setReviewAssignee(e.target.value)} disabled={reviewAdmins.length===0} style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #ccc', background: reviewAdmins.length===0 ? '#f5f5f5' : '#fff' }}>
+                  <option value="">{reviewAdmins.length===0 ? 'No admins available' : 'Select…'}</option>
                   {reviewAdmins.map(a => (<option key={a.id} value={a.id}>{a.username || a.email || a.id}</option>))}
                 </select>
               </div>
@@ -3163,6 +3237,7 @@ const FolderTree = ({ currentPath, onPathChange, refreshTrigger, userRole, onFil
                     requestedByEmail: cur?.email || null,
                     status: 'pending',
                     requestedAt: serverTimestamp(),
+                    tenantId,
                   }));
                   await Promise.allSettled(tasks);
                   setBulkReviewModal({ open: false, fileIds: [] });

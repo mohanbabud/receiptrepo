@@ -1,17 +1,15 @@
 /* Modern UI Theme Variables */
 :root {
-  --primary: #14b8a6;
-  --primary-light: #e0fdfa;
-  --primary-dark: #0f766e;
-  --accent: #f97316;
+  /* Removed hard-coded palette so index.css [data-accent] overrides take effect.
+    Provide legacy aliases mapping to dynamic accent system. */
+  --primary: var(--primary-color); /* legacy alias */
+  --accent: var(--secondary-color); /* legacy alias */
   --background: #e0e7ef;
   --surface: #f6f7fb;
   --text-main: #1e293b;
   --text-muted: #94a3b8;
   --border-radius: 10px;
   --shadow: 0 2px 8px rgba(0,0,0,0.08);
-  /* Aliases used elsewhere */
-  --primary-color: var(--primary);
   --bg-primary: #ffffff;
   --text-primary: var(--text-main);
   /* Added tokens used throughout */
@@ -65,6 +63,11 @@
   top: 0;
   z-index: 100;
 }
+
+/* Accent utility classes (dynamic via [data-accent]) */
+.accent-bg { background: var(--secondary-color) !important; color:#fff !important; }
+.accent-border { border-color: var(--secondary-color) !important; }
+.accent-text { color: var(--secondary-color) !important; }
 
 .header h1 {
   margin: 0;

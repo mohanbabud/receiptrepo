@@ -9,6 +9,8 @@ import AdminPanel from './components/AdminPanel';
 import TreeViewPage from './components/TreeViewPage';
 import TagSearchPage from './components/TagSearchPage';
 import './App.css';
+import { MULTI_TENANCY_ENABLED } from './featureFlags';
+import { TenantProvider } from './tenantContext';
 
 function App() {
   const [user, setUser] = useState(null);
@@ -163,17 +165,25 @@ function App() {
     return <div className="loading">Loading...</div>;
   }
 
+  const appRoutes = (
+    <Routes>
+      <Route path="/login" element={!user ? <Login /> : <Navigate to="/dashboard" />} />
+      <Route path="/dashboard" element={user ? <Dashboard user={user} userRole={userRole} theme={theme} setTheme={setTheme} accent={accent} setAccent={setAccent} preset={preset} setPreset={setPreset} /> : <Navigate to="/login" />} />
+      <Route path="/admin" element={user && userRole === 'admin' ? <AdminPanel user={user} /> : <Navigate to="/dashboard" />} />
+      <Route path="/tree-view" element={user ? <TreeViewPage user={user} userRole={userRole} /> : <Navigate to="/login" />} />
+      <Route path="/search" element={user ? <TagSearchPage /> : <Navigate to="/login" />} />
+      <Route path="/" element={<Navigate to={user ? '/dashboard' : '/login'} />} />
+    </Routes>
+  );
+
   return (
     <div className="app">
       <Router>
-        <Routes>
-          <Route path="/login" element={!user ? <Login /> : <Navigate to="/dashboard" />} />
-          <Route path="/dashboard" element={user ? <Dashboard user={user} userRole={userRole} theme={theme} setTheme={setTheme} accent={accent} setAccent={setAccent} preset={preset} setPreset={setPreset} /> : <Navigate to="/login" />} />
-          <Route path="/admin" element={user && userRole === 'admin' ? <AdminPanel user={user} /> : <Navigate to="/dashboard" />} />
-          <Route path="/tree-view" element={user ? <TreeViewPage user={user} userRole={userRole} /> : <Navigate to="/login" />} />
-          <Route path="/search" element={user ? <TagSearchPage /> : <Navigate to="/login" />} />
-          <Route path="/" element={<Navigate to={user ? '/dashboard' : '/login'} />} />
-        </Routes>
+        {MULTI_TENANCY_ENABLED ? (
+          <TenantProvider tenantId={'default'} setTenantId={() => {}}>
+            {appRoutes}
+          </TenantProvider>
+        ) : appRoutes}
       </Router>
     </div>
   );

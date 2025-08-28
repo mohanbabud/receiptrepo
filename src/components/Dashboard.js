@@ -1,4 +1,6 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
+import { collection, query, where, onSnapshot } from 'firebase/firestore';
+import { db } from '../firebase';
 import { signOut } from 'firebase/auth';
 import { Link } from 'react-router-dom';
 import { auth } from '../firebase';
@@ -211,6 +213,22 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
 
   // When preview is closed, signal FolderTree to close any open tags UI (popover or editor)
   const prevSelectedRef = useRef(null);
+  // Pending admin actions notification
+  const [pendingCounts, setPendingCounts] = useState({ requests: 0, reviews: 0 });
+  useEffect(() => {
+    if (userRole !== 'admin' && userRole !== 'platform') return; // only for admins
+    const unsubs = [];
+    try {
+      const rq = query(collection(db, 'requests'), where('status','==','pending'));
+      unsubs.push(onSnapshot(rq, (snap)=> setPendingCounts(prev => ({ ...prev, requests: snap.size }))));
+    } catch {}
+    try {
+      const rvq = query(collection(db, 'reviews'), where('status','==','pending'));
+      unsubs.push(onSnapshot(rvq, (snap)=> setPendingCounts(prev => ({ ...prev, reviews: snap.size }))));
+    } catch {}
+    return () => { unsubs.forEach(u => { try { u(); } catch {} }); };
+  }, [userRole]);
+  const totalPending = (pendingCounts.requests || 0) + (pendingCounts.reviews || 0);
   useEffect(() => {
     const prev = prevSelectedRef.current;
     if (prev && !selectedFile) {
@@ -252,7 +270,11 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
   <a href="#main-content" className="skip-link">Skip to content</a>
       <header className="header">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16 }}>
-          <h1>Receipt Manager</h1>
+          <h1 style={{ display:'flex', alignItems:'center', gap:8 }}>Receipt Manager {userRole === 'admin' && totalPending > 0 && (
+            <span title={`${pendingCounts.requests} request(s), ${pendingCounts.reviews} review(s) pending`} style={{background:'#dc2626',color:'#fff',padding:'2px 8px',borderRadius:12,fontSize:12,fontWeight:600,display:'inline-flex',alignItems:'center'}}>
+              {totalPending}
+            </span>
+          )}</h1>
           {/* Top header actions removed; Files section provides upload/refresh/create controls */}
           {/* Mobile menu toggle (visible on small screens) */}
           <button
@@ -292,7 +314,7 @@ const Dashboard = ({ user, userRole, theme, setTheme, accent, setAccent, preset,
                 <div className="user-menu-list" role="menu" aria-label="Account">
                   {userRole === 'admin' && (
                     <Link to="/admin" className="user-menu-item" role="menuitem" onClick={() => setUserMenuOpen(false)}>
-                      <FaTools style={{ marginRight: 6 }} aria-hidden="true" /> Admin Panel
+                      <FaTools style={{ marginRight: 6 }} aria-hidden="true" /> Admin Panel {totalPending > 0 && <span style={{marginLeft:6,background:'#ef4444',color:'#fff',borderRadius:10,padding:'0 6px',fontSize:11}}>{totalPending}</span>}
                     </Link>
                   )}
                   <button className="user-menu-item" role="menuitem" onClick={() => { setShowChangePw(true); setUserMenuOpen(false); }}>
