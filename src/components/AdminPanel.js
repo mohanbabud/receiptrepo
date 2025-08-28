@@ -20,6 +20,7 @@ import { FaArrowLeft, FaCheck, FaTimes, FaUsers, FaFileAlt, FaClock, FaKey, FaEn
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import AdminSetPasswordModal from './AdminSetPasswordModal';
 import AdminEditUserModal from './AdminEditUserModal';
+import FilePreview from './FilePreview';
 import './AdminPanel.css';
 import { useTenant } from '../tenantContext';
 import { MULTI_TENANCY_ENABLED } from '../featureFlags';
@@ -29,6 +30,8 @@ const AdminPanel = ({ user }) => {
   const [users, setUsers] = useState([]);
   const [reviews, setReviews] = useState([]);
   const [files, setFiles] = useState([]);
+  // Review preview state
+  const [previewReview, setPreviewReview] = useState(null);
   const [activeTab, setActiveTab] = useState('requests');
   const [loading, setLoading] = useState(true);
   const [resetPasswordTarget, setResetPasswordTarget] = useState(null);
@@ -48,7 +51,9 @@ const AdminPanel = ({ user }) => {
   const [editUserTarget, setEditUserTarget] = useState(null);
   const [showEditUser, setShowEditUser] = useState(false);
   const [deletingUid, setDeletingUid] = useState('');
-  const { tenantId } = MULTI_TENANCY_ENABLED ? useTenant() : { tenantId: 'default' };
+  // Always call hook; feature flag just controls usage
+  const tenantContext = useTenant();
+  const tenantId = MULTI_TENANCY_ENABLED ? tenantContext.tenantId : 'default';
   // Tenancy management
   const [tenants, setTenants] = useState([]);
   const [newTenantName, setNewTenantName] = useState('');
@@ -118,7 +123,15 @@ const AdminPanel = ({ user }) => {
     );
     // Users
     const unsubUsers = onSnapshot(query(collection(db, 'users')), (snap) => {
-      const arr=[]; snap.forEach(d=>{ const data=d.data(); if(isPlatformAdmin || !tenantId || data.tenantId===tenantId) arr.push({id:d.id,...data}); }); setUsers(arr);
+      const arr=[]; snap.forEach(d=>{ const data=d.data();
+        const role = (data.role || '').toLowerCase();
+        const isAdminRole = role === 'admin' || role === 'platform';
+        // Always include platform/admin roles so they can be assigned reviews, even if from another tenant
+        if (isPlatformAdmin || !tenantId || data.tenantId===tenantId || isAdminRole) {
+          arr.push({id:d.id,...data});
+        }
+      });
+      setUsers(arr);
     });
     // Files
     const unsubFiles = onSnapshot(
@@ -298,6 +311,7 @@ const AdminPanel = ({ user }) => {
   const renderReviews = () => {
     const pending = reviews.filter(r => (r.status || 'pending') === 'pending');
     const formatDate = (ts) => (!ts || !ts.toDate) ? 'Unknown' : ts.toDate().toLocaleDateString();
+    const adminUsers = users.filter(u => (u.role === 'admin' || u.role === 'platform'));
     return (
       <div className="admin-section">
         <h3>Pending Reviews ({pending.length})</h3>
@@ -313,14 +327,74 @@ const AdminPanel = ({ user }) => {
                   {r.fullPath && !r.path && <p>Path: {r.fullPath}</p>}
                   <p>Requested by: {r.requestedByEmail || r.requestedBy}</p>
                   {r.assignedToEmail && <p>Assigned to: {r.assignedToEmail}</p>}
+                  {!r.assignedToEmail && (
+                    <div style={{margin:'4px 0'}}>
+                      <label style={{fontSize:12,marginRight:4}}>Assign admin:</label>
+                      {adminUsers.length === 0 ? (
+                        <span style={{fontSize:12,color:'#a33'}}>No admins available</span>
+                      ) : (
+                        <select
+                          value={r.assignedTo || ''}
+                          onChange={async (e) => {
+                            const val = e.target.value;
+                            if (!val) return;
+                            const admin = adminUsers.find(a => a.id === val);
+                            try { await updateDoc(doc(db, 'reviews', r.id), { assignedTo: val, assignedToEmail: admin?.email || admin?.username }); }
+                            catch { alert('Failed to assign'); }
+                          }}
+                        >
+                          <option value="">-- select --</option>
+                          {adminUsers.map(a => (
+                            <option key={a.id} value={a.id}>{a.email || a.username || a.id}</option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                  )}
+                  {adminUsers.length > 0 && (
+                    <p style={{fontSize:11,color:'#666'}}>Admins: {adminUsers.map(a => a.email || a.username || a.id).join(', ')}</p>
+                  )}
                   <p>Date: {formatDate(r.requestedAt)}</p>
                 </div>
                 <div className="request-actions">
+                  <button
+                    onClick={() => setPreviewReview(r)}
+                    className="preview-btn"
+                    title="Preview file"
+                    style={{background:'#555',color:'#fff'}}
+                  >Preview</button>
                   <button onClick={async () => { try { await updateDoc(doc(db, 'reviews', r.id), { status: 'reviewed', reviewedAt: new Date(), reviewedBy: user.uid }); } catch (e) { alert('Failed to mark reviewed'); } }} className="approve-btn"><FaCheck /> Mark reviewed</button>
                   <button onClick={async () => { try { await updateDoc(doc(db, 'reviews', r.id), { status: 'rejected', reviewedAt: new Date(), reviewedBy: user.uid }); } catch (e) { alert('Failed to reject'); } }} className="reject-btn"><FaTimes /> Reject</button>
                 </div>
               </div>
             ))}
+          </div>
+        )}
+        {previewReview && (
+          <div className="modal-overlay" style={{zIndex:10000}}>
+            <div className="modal-content" style={{background:'transparent',boxShadow:'none',padding:0}}>
+              <FilePreview
+                file={{
+                  // Provide the minimal shape FilePreview expects
+                  id: previewReview.fileId || previewReview.id,
+                  name: previewReview.fileName || (previewReview.fullPath ? previewReview.fullPath.split('/').pop() : (previewReview.path ? previewReview.path.split('/').pop() : 'file')),
+                  fullPath: previewReview.fullPath || previewReview.path,
+                  path: previewReview.path,
+                  downloadURL: previewReview.downloadURL,
+                  type: previewReview.type,
+                  size: previewReview.size
+                }}
+                userRole="admin"
+                userId={user?.uid}
+                onClose={() => setPreviewReview(null)}
+                reviewActions={(
+                  <>
+                    <button onClick={async () => { try { await updateDoc(doc(db, 'reviews', previewReview.id), { status: 'reviewed', reviewedAt: new Date(), reviewedBy: user.uid }); setPreviewReview(null); } catch { alert('Failed to approve'); } }} className="approve-btn"><FaCheck /> Approve</button>
+                    <button onClick={async () => { try { await updateDoc(doc(db, 'reviews', previewReview.id), { status: 'rejected', reviewedAt: new Date(), reviewedBy: user.uid }); setPreviewReview(null); } catch { alert('Failed to reject'); } }} className="reject-btn"><FaTimes /> Reject</button>
+                  </>
+                )}
+              />
+            </div>
           </div>
         )}
       </div>

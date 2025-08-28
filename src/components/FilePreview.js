@@ -14,11 +14,13 @@ import {
   FaCompressArrowsAlt,
   FaCompressAlt,
   FaUndoAlt,
-  FaRedoAlt
+  FaRedoAlt,
+  FaColumns,
+  FaWindowRestore
 } from 'react-icons/fa';
 import './FilePreview.css';
 
-const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
+const FilePreview = ({ file, onClose, userRole, userId, onFileAction, reviewActions }) => {
   const [loading, setLoading] = useState(false);
   const [newName, setNewName] = useState(file.originalName || file.name);
   const [isRenaming, setIsRenaming] = useState(false);
@@ -32,6 +34,7 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
   // Drag (move) preview window
   const [pos, setPos] = useState(null); // {x, y} once dragged
   const [dragging, setDragging] = useState(false);
+  const [isDocked, setIsDocked] = useState(false); // right-side dock layout
   const previewRef = useRef(null);
   const headerRef = useRef(null);
   
@@ -463,11 +466,11 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
   };
 
   return (
-      <div className="file-preview-overlay">
+  <div className={`file-preview-overlay${isDocked ? ' docked-right' : ' modal-top'}`}>
         <div
           ref={previewRef}
-          className={`file-preview${pos ? ' movable' : ''}${dragging ? ' dragging' : ''}`}
-          style={pos ? { position: 'absolute', left: pos.x, top: pos.y } : undefined}
+      className={`file-preview redesigned${pos ? ' movable' : ''}${dragging ? ' dragging' : ''}${isDocked ? ' docked' : ''}`}
+      style={!isDocked && pos ? { position: 'absolute', left: pos.x, top: pos.y } : undefined}
         >
           <div ref={headerRef} className="preview-header">
             <div className="file-title">
@@ -487,6 +490,13 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
               )}
             </div>
             <div className="preview-actions">
+              <button
+                onClick={() => setIsDocked(d => !d)}
+                className="action-btn layout-toggle"
+                title={isDocked ? 'Undock (return to floating modal)' : 'Dock to right side'}
+              >
+                {isDocked ? <FaWindowRestore /> : <FaColumns />}
+              </button>
               {/* Image Fit/Fill toggle (only for images) */}
               {String(effectiveType || '').toLowerCase().startsWith('image/') && (
                 <button
@@ -563,9 +573,14 @@ const FilePreview = ({ file, onClose, userRole, userId, onFileAction }) => {
                 <span className="note">Note: File operations require admin approval</span>
               )}
             </div>
-          </div>
-        </div>
-      </div>
+            {reviewActions && (
+              <div className="review-actions-inline" style={{display:'flex',gap:8,alignItems:'center'}}>
+                {reviewActions}
+              </div>
+            )}
+          </div>{/* preview-footer */}
+        </div>{/* file-preview */}
+    </div>
   );
 };
 
